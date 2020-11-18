@@ -656,7 +656,11 @@ impl SwapchainFrameState {
             p_results: std::ptr::null_mut(),
             ..Default::default()
         };
-        unsafe { device.ext_swapchain.queue_present(device.queue, &present_info).expect("Failed to enqueue present") };
+        let present_result = unsafe { device.ext_swapchain.queue_present(device.queue, &present_info) };
+        match present_result {
+            Err(r) => if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR { panic!(r) }
+            _ => ()
+        }
         s.image_acquired = false;
 
         self.current_frame_slot = (self.current_frame_slot + 1) % FRAMES_IN_FLIGHT;
@@ -738,7 +742,7 @@ fn main() {
     let scene = Scene::new();
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = winit::event_loop::ControlFlow::Wait;
+        *control_flow = winit::event_loop::ControlFlow::Poll;
         match event {
             winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
                 winit::event::WindowEvent::CloseRequested => {
@@ -774,7 +778,7 @@ fn main() {
                             scene.render();
                             frame_state.end_frame(&device, &swapchain, &swapchain_images, &cmd_list);
                         },
-                        Err(r) => println!("{:?}", r)
+                        Err(r) => if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR { panic!(r) }
                     }
                 }
             },
