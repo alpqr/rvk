@@ -266,6 +266,23 @@ impl Device {
             self.device.destroy_device(None);
         }
     }
+
+    pub fn wait_idle(&self) {
+        unsafe { self.device.device_wait_idle().expect("DeviceWaitIdle failed") };
+    }
+
+    pub fn wait_fence(&self, fence: &ash::vk::Fence) {
+        let fence_list = [*fence];
+        unsafe { self.device.wait_for_fences(&fence_list, true, u64::max_value()).expect("Fence wait failed") };
+    }
+
+    pub fn wait_reset_fence(&self, fence: &ash::vk::Fence) {
+        let fence_list = [*fence];
+        unsafe {
+            self.device.wait_for_fences(&fence_list, true, u64::max_value()).expect("Fence wait failed");
+            self.device.reset_fences(&fence_list).expect("Fence reset failed");
+        }
+    }
 }
 
 bitflags! {
@@ -327,7 +344,7 @@ impl Swapchain {
             return;
         }
 
-        unsafe { device.device.device_wait_idle().expect("DeviceWaitIdle failed") };
+        device.wait_idle();
 
         let caps = unsafe { instance.ext_surface.get_physical_device_surface_capabilities(physical_device.physical_device, surface.surface).unwrap() };
         let buffer_count = std::cmp::max(std::cmp::min(3, caps.max_image_count), caps.min_image_count);
@@ -418,10 +435,9 @@ impl SwapchainImages {
                 },
                 subresource_range: ash::vk::ImageSubresourceRange {
                     aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
                     level_count: 1,
-                    base_array_layer: 0,
                     layer_count: 1,
+                    ..Default::default()
                 },
                 ..Default::default()
             };
@@ -441,12 +457,79 @@ impl SwapchainImages {
     }
 }
 
+pub struct CommandPool {
+    pub pools: smallvec::SmallVec<[ash::vk::CommandPool; FRAMES_IN_FLIGHT as usize]>,
+}
+
+impl CommandPool {
+    pub fn new(physical_device: &PhysicalDevice, device: &Device) -> Self {
+        let mut pools: smallvec::SmallVec<[ash::vk::CommandPool; FRAMES_IN_FLIGHT as usize]> = smallvec::smallvec![];
+        let pool_create_info = ash::vk::CommandPoolCreateInfo {
+            queue_family_index: physical_device.gfx_compute_present_queue_family_index,
+            ..Default::default()
+        };
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let pool = unsafe { device.device.create_command_pool(&pool_create_info, None).expect("Failed to create command pool") };
+            pools.push(pool);
+        }
+        CommandPool {
+            pools
+        }
+    }
+
+    pub fn release_resources(&self, device: &Device) {
+        for &pool in self.pools.iter() {
+            unsafe { device.device.destroy_command_pool(pool, None) };
+        }
+    }
+
+    pub fn reset(&self, device: &Device, slot: u32) {
+        unsafe { device.device.reset_command_pool(self.pools[slot as usize], ash::vk::CommandPoolResetFlags::empty()).expect("Failed to reset command pool") };
+    }
+}
+
+pub struct CommandList {
+    pub command_buffers: smallvec::SmallVec<[ash::vk::CommandBuffer; FRAMES_IN_FLIGHT as usize]>,
+}
+
+impl CommandList {
+    pub fn new(device: &Device, cmd_pool: &CommandPool) -> Self {
+        let mut command_buffers: smallvec::SmallVec<[ash::vk::CommandBuffer; FRAMES_IN_FLIGHT as usize]> = smallvec::smallvec![];
+        for slot in 0..FRAMES_IN_FLIGHT {
+            let allocate_info = ash::vk::CommandBufferAllocateInfo {
+                command_pool: cmd_pool.pools[slot as usize],
+                level: ash::vk::CommandBufferLevel::PRIMARY,
+                command_buffer_count: 1,
+                ..Default::default()
+            };
+            let buffers = unsafe { device.device.allocate_command_buffers(&allocate_info).expect("Failed to allocate command buffer") };
+            command_buffers.push(buffers[0]);
+        }
+        CommandList {
+            command_buffers
+        }
+    }
+
+    pub fn begin(&self, device: &Device, slot: u32) {
+        let begin_info = ash::vk::CommandBufferBeginInfo {
+            ..Default::default()
+        };
+        unsafe { device.device.begin_command_buffer(self.command_buffers[slot as usize], &begin_info).expect("Failed to begin command buffer") };
+    }
+
+    pub fn end(&self, device: &Device, slot: u32) {
+        unsafe { device.device.end_command_buffer(self.command_buffers[slot as usize]).expect("Failed to end command buffer") };
+    }
+}
+
 pub struct SwapchainFrameSyncObjects {
     pub image_fence: ash::vk::Fence,
+    pub cmd_fence: ash::vk::Fence,
     pub image_sem: ash::vk::Semaphore,
     pub present_sem: ash::vk::Semaphore,
     pub image_acquired: bool,
     pub image_fence_waitable: bool,
+    pub cmd_fence_waitable: bool,
     pub image_sem_waitable: bool
 }
 
@@ -462,10 +545,12 @@ fn make_swapchain_frame_sync_objects(device: &Device) -> smallvec::SmallVec<[Swa
         };
         sync_objects.push(SwapchainFrameSyncObjects {
             image_fence: unsafe { device.device.create_fence(&fence_create_info, None).expect("Failed to create swapchain image fence") },
+            cmd_fence: unsafe { device.device.create_fence(&fence_create_info, None).expect("Failed to create swapchain command fence") },
             image_sem: unsafe { device.device.create_semaphore(&sem_create_info, None).expect("Failed to create swapchain image semaphore") },
             present_sem: unsafe { device.device.create_semaphore(&sem_create_info, None).expect("Failed to create present semaphore") },
             image_acquired: false,
             image_fence_waitable: true,
+            cmd_fence_waitable: true,
             image_sem_waitable: false
         });
     }
@@ -490,27 +575,26 @@ impl SwapchainFrameState {
     pub fn release_resources(&self, device: &Device) {
         for sync in self.sync_objects.iter() {
             if sync.image_fence_waitable {
-                let fences = [sync.image_fence];
-                unsafe { device.device.wait_for_fences(&fences, true, u64::max_value()).expect("Fence wait failed") };
+                device.wait_fence(&sync.image_fence);
+            }
+            if sync.cmd_fence_waitable {
+                device.wait_fence(&sync.cmd_fence);
             }
             unsafe {
                 device.device.destroy_fence(sync.image_fence, None);
+                device.device.destroy_fence(sync.cmd_fence, None);
                 device.device.destroy_semaphore(sync.image_sem, None);
                 device.device.destroy_semaphore(sync.present_sem, None);
             }
         }
     }
 
-    pub fn begin_frame(&mut self, device: &Device, swapchain: &Swapchain) -> Result<u32, ash::vk::Result> {
+    pub fn begin_frame(&mut self, device: &Device, swapchain: &Swapchain, cmd_pool: &CommandPool, cmd_list: &CommandList) -> Result<u32, ash::vk::Result> {
         let s = &mut self.sync_objects[self.current_frame_slot as usize];
         if !s.image_acquired {
             if s.image_fence_waitable {
-                let fences = [s.image_fence];
-                unsafe {
-                    device.device.wait_for_fences(&fences, true, u64::max_value()).expect("Fence wait failed");
-                    device.device.reset_fences(&fences).expect("Fence reset failed");
-                    s.image_fence_waitable = false;
-                }
+                device.wait_reset_fence(&s.image_fence);
+                s.image_fence_waitable = false;
             }
             let index_and_suboptimal = unsafe { device.ext_swapchain.acquire_next_image(swapchain.swapchain.unwrap(), u64::max_value(), s.image_sem, s.image_fence) };
             match index_and_suboptimal {
@@ -522,12 +606,93 @@ impl SwapchainFrameState {
             s.image_fence_waitable = true;
             s.image_sem_waitable = true;
         }
-        println!("{} {}", self.current_frame_slot, self.current_image_index);
+        //println!("{} {}", self.current_frame_slot, self.current_image_index);
+
+        if s.cmd_fence_waitable {
+            device.wait_reset_fence(&s.cmd_fence);
+            s.cmd_fence_waitable = false;
+        }
+
+        cmd_pool.reset(device, self.current_frame_slot);
+        cmd_list.begin(device, self.current_frame_slot);
+
         return Ok(self.current_frame_slot);
     }
 
-    pub fn end_frame(&mut self) {
+    pub fn end_frame(&mut self, device: &Device, swapchain: &Swapchain, swapchain_images: &SwapchainImages, cmd_list: &CommandList) {
+        self.transition(device, swapchain_images, cmd_list,
+                        ash::vk::AccessFlags::empty(),
+                        ash::vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        ash::vk::ImageLayout::UNDEFINED,
+                        ash::vk::ImageLayout::PRESENT_SRC_KHR,
+                        ash::vk::PipelineStageFlags::TOP_OF_PIPE,
+                        ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+
+        cmd_list.end(&device, self.current_frame_slot);
+
+        let s = &mut self.sync_objects[self.current_frame_slot as usize];
+        let wait_dst_stage_mask = ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
+        let submit_info = ash::vk::SubmitInfo {
+            wait_semaphore_count: if s.image_sem_waitable { 1 } else  { 0 },
+            p_wait_semaphores: &s.image_sem,
+            p_wait_dst_stage_mask: &wait_dst_stage_mask,
+            command_buffer_count: 1,
+            p_command_buffers: &cmd_list.command_buffers[self.current_frame_slot as usize],
+            signal_semaphore_count: 1,
+            p_signal_semaphores: &s.present_sem,
+            ..Default::default()
+        };
+        let submits = [submit_info];
+        unsafe { device.device.queue_submit(device.queue, &submits, s.cmd_fence).expect("Failed to submit to queue") };
+        s.cmd_fence_waitable = true;
+        s.image_sem_waitable = false;
+
+        let present_info = ash::vk::PresentInfoKHR {
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &s.present_sem,
+            swapchain_count: 1,
+            p_swapchains: &swapchain.swapchain.unwrap(),
+            p_image_indices: &self.current_image_index,
+            p_results: std::ptr::null_mut(),
+            ..Default::default()
+        };
+        unsafe { device.ext_swapchain.queue_present(device.queue, &present_info).expect("Failed to enqueue present") };
+        s.image_acquired = false;
+
         self.current_frame_slot = (self.current_frame_slot + 1) % FRAMES_IN_FLIGHT;
+    }
+
+    fn transition(&self, device: &Device, swapchain_images: &SwapchainImages, cmd_list: &CommandList,
+                  src_access_mask: ash::vk::AccessFlags,
+                  dst_access_mask: ash::vk::AccessFlags,
+                  old_layout: ash::vk::ImageLayout,
+                  new_layout: ash::vk::ImageLayout,
+                  src_stage_mask: ash::vk::PipelineStageFlags,
+                  dst_stage_mask: ash::vk::PipelineStageFlags)
+    {
+        let image_barriers = [ash::vk::ImageMemoryBarrier {
+            src_access_mask,
+            dst_access_mask,
+            old_layout,
+            new_layout,
+            image: swapchain_images.images[self.current_image_index as usize],
+            subresource_range: ash::vk::ImageSubresourceRange {
+                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                level_count: 1,
+                layer_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        unsafe {
+            device.device.cmd_pipeline_barrier(cmd_list.command_buffers[self.current_frame_slot as usize],
+                                               src_stage_mask,
+                                               dst_stage_mask,
+                                               ash::vk::DependencyFlags::empty(),
+                                               &[],
+                                               &[],
+                                               &image_barriers);
+        }
     }
 }
 
@@ -560,6 +725,8 @@ fn main() {
     let surface = WindowSurface::new(&instance, &window);
     let physical_device = PhysicalDevice::new(&instance, &surface.surface);
     let device = Device::new(&instance, &physical_device);
+    let cmd_pool = CommandPool::new(&physical_device, &device);
+    let cmd_list = CommandList::new(&device, &cmd_pool);
     let mut swapchain = Swapchain::new();
     swapchain.resize(&instance, &physical_device, &device, &surface, &window);
     let mut swapchain_images = SwapchainImages::new(&device, &swapchain);
@@ -580,6 +747,7 @@ fn main() {
                     frame_state.release_resources(&device);
                     swapchain_images.release_resources(&device);
                     swapchain.release_resources(&device);
+                    cmd_pool.release_resources(&device);
                     device.release_resources();
                     surface.release_resources(&instance);
                     instance.release_resources();
@@ -599,11 +767,14 @@ fn main() {
                         frame_state = SwapchainFrameState::new(&device);
                         println!("Resized swapchain to {:?}", surface_size);
                     }
-                    if frame_state.begin_frame(&device, &swapchain).is_ok() {
-                        println!("Render, elapsed since last {:?}", frame_time.elapsed());
-                        frame_time = std::time::Instant::now();
-                        scene.render();
-                        frame_state.end_frame();
+                    match frame_state.begin_frame(&device, &swapchain, &cmd_pool, &cmd_list) {
+                        Ok(current_frame_slot) => {
+                            println!("Render, elapsed since last {:?}", frame_time.elapsed());
+                            frame_time = std::time::Instant::now();
+                            scene.render();
+                            frame_state.end_frame(&device, &swapchain, &swapchain_images, &cmd_list);
+                        },
+                        Err(r) => println!("{:?}", r)
                     }
                 }
             },
