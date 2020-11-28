@@ -30,6 +30,7 @@ const_cstr! {
     VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
     SWAPCHAIN_EXT_NAME = "VK_KHR_swapchain";
     PHYS_DEV_PROP2_EXT_NAME = "VK_KHR_get_physical_device_properties2";
+    DEFAULT_SHADER_ENTRY_POINT = "main";
 }
 
 impl Instance {
@@ -431,7 +432,7 @@ bitflags! {
 }
 
 pub struct Swapchain {
-    pub swapchain: Option<ash::vk::SwapchainKHR>,
+    pub swapchain: ash::vk::SwapchainKHR,
     pub format: ash::vk::Format,
     pub flags: SwapchainFlags,
     pub pixel_size: ash::vk::Extent2D,
@@ -451,45 +452,53 @@ fn is_srgb_format(format: ash::vk::Format) -> bool {
 }
 
 impl Swapchain {
-    pub fn new() -> Self {
-        Swapchain {
-            swapchain: None,
-            format: ash::vk::Format::UNDEFINED,
-            flags: SwapchainFlags::empty(),
-            pixel_size: Default::default(),
-        }
-    }
-
-    pub fn new_with_flags(flags: SwapchainFlags) -> Self {
-        Swapchain {
-            swapchain: None,
-            format: ash::vk::Format::UNDEFINED,
-            flags,
-            pixel_size: Default::default(),
-        }
-    }
-
     pub fn release_resources(&self, device: &Device) {
-        if self.swapchain.is_some() {
-            unsafe {
-                device
-                    .ext_swapchain
-                    .destroy_swapchain(self.swapchain.unwrap(), None)
-            };
+        unsafe { device.ext_swapchain.destroy_swapchain(self.swapchain, None) };
+    }
+}
+
+pub struct SwapchainBuilder {
+    inner: Swapchain,
+}
+
+impl SwapchainBuilder {
+    pub fn new() -> Self {
+        SwapchainBuilder {
+            inner: Swapchain {
+                swapchain: ash::vk::SwapchainKHR::null(),
+                format: ash::vk::Format::UNDEFINED,
+                flags: SwapchainFlags::empty(),
+                pixel_size: Default::default(),
+            },
         }
     }
 
-    pub fn resize(
-        &mut self,
+    pub fn with_flags(&mut self, flags: SwapchainFlags) -> &mut Self {
+        self.inner.flags = flags;
+        self
+    }
+
+    pub fn with_existing(&mut self, swapchain: &Swapchain) -> &mut Self {
+        self.inner = Swapchain {
+            swapchain: swapchain.swapchain,
+            format: swapchain.format,
+            flags: swapchain.flags,
+            pixel_size: swapchain.pixel_size,
+        };
+        self
+    }
+
+    pub fn build(
+        &self,
         instance: &Instance,
         physical_device: &PhysicalDevice,
         device: &Device,
         surface: &WindowSurface,
         window: &winit::window::Window,
-    ) {
+    ) -> Result<Swapchain, ()> {
         let image_extent = surface.pixel_size(instance, physical_device, window);
         if image_extent.width == 0 || image_extent.height == 0 {
-            return;
+            return Err(());
         }
 
         let caps = unsafe {
@@ -511,13 +520,13 @@ impl Swapchain {
         } else {
             caps.current_transform
         };
-        let composite_alpha = if self.flags.contains(SwapchainFlags::PREMUL_ALPHA)
+        let composite_alpha = if self.inner.flags.contains(SwapchainFlags::PREMUL_ALPHA)
             && caps
                 .supported_composite_alpha
                 .contains(ash::vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED)
         {
             ash::vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED
-        } else if self.flags.contains(SwapchainFlags::NON_PREMUL_ALPHA)
+        } else if self.inner.flags.contains(SwapchainFlags::NON_PREMUL_ALPHA)
             && caps
                 .supported_composite_alpha
                 .contains(ash::vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED)
@@ -531,7 +540,7 @@ impl Swapchain {
         } else {
             ash::vk::CompositeAlphaFlagsKHR::OPAQUE
         };
-        let image_usage = if self.flags.contains(SwapchainFlags::ALLOW_READBACK)
+        let image_usage = if self.inner.flags.contains(SwapchainFlags::ALLOW_READBACK)
             && caps
                 .supported_usage_flags
                 .contains(ash::vk::ImageUsageFlags::TRANSFER_SRC)
@@ -540,7 +549,7 @@ impl Swapchain {
         } else {
             ash::vk::ImageUsageFlags::COLOR_ATTACHMENT
         };
-        let present_mode = if self.flags.contains(SwapchainFlags::NO_VSYNC) {
+        let present_mode = if self.inner.flags.contains(SwapchainFlags::NO_VSYNC) {
             let supported_present_modes = unsafe {
                 instance
                     .ext_surface
@@ -568,7 +577,7 @@ impl Swapchain {
                 .unwrap()
         };
         let mut chosen_format: Option<ash::vk::SurfaceFormatKHR> = None;
-        let wants_srgb = self.flags.contains(SwapchainFlags::SRGB);
+        let wants_srgb = self.inner.flags.contains(SwapchainFlags::SRGB);
         for format in &supported_formats {
             if format.format != ash::vk::Format::UNDEFINED
                 && wants_srgb == is_srgb_format(format.format)
@@ -590,11 +599,7 @@ impl Swapchain {
             composite_alpha,
             present_mode,
             clipped: ash::vk::TRUE,
-            old_swapchain: if self.swapchain.is_some() {
-                self.swapchain.unwrap()
-            } else {
-                ash::vk::SwapchainKHR::null()
-            },
+            old_swapchain: self.inner.swapchain,
             image_array_layers: 1,
             ..Default::default()
         };
@@ -605,16 +610,17 @@ impl Swapchain {
                 .create_swapchain(&swapchain_create_info, None)
                 .expect("Failed to create swapchain")
         };
-        if self.swapchain.is_some() {
-            unsafe {
-                device
-                    .ext_swapchain
-                    .destroy_swapchain(self.swapchain.unwrap(), None)
-            };
-        }
-        self.swapchain = Some(swapchain);
-        self.format = chosen_format.unwrap().format;
-        self.pixel_size = image_extent;
+        unsafe {
+            device
+                .ext_swapchain
+                .destroy_swapchain(self.inner.swapchain, None)
+        };
+        Ok(Swapchain {
+            swapchain,
+            format: chosen_format.unwrap().format,
+            flags: self.inner.flags,
+            pixel_size: image_extent,
+        })
     }
 }
 
@@ -628,7 +634,7 @@ impl SwapchainImages {
         let images = unsafe {
             device
                 .ext_swapchain
-                .get_swapchain_images(swapchain.swapchain.unwrap())
+                .get_swapchain_images(swapchain.swapchain)
                 .expect("Failed to get swapchain images")
         };
         let mut views: smallvec::SmallVec<[ash::vk::ImageView; 8]> = smallvec::smallvec![];
@@ -975,17 +981,13 @@ impl SwapchainFrameState {
             }
             let index_and_suboptimal = unsafe {
                 device.ext_swapchain.acquire_next_image(
-                    swapchain.swapchain.unwrap(),
+                    swapchain.swapchain,
                     u64::max_value(),
                     s.image_sem,
                     s.image_fence,
-                )
+                )?
             };
-            match index_and_suboptimal {
-                Err(r) => return Err(r),
-                _ => (),
-            };
-            self.current_image_index = index_and_suboptimal.unwrap().0;
+            self.current_image_index = index_and_suboptimal.0;
             s.image_acquired = true;
             s.image_fence_waitable = true;
             s.image_sem_waitable = true;
@@ -1054,7 +1056,7 @@ impl SwapchainFrameState {
             wait_semaphore_count: 1,
             p_wait_semaphores: &s.present_sem,
             swapchain_count: 1,
-            p_swapchains: &swapchain.swapchain.unwrap(),
+            p_swapchains: &swapchain.swapchain,
             p_image_indices: &self.current_image_index,
             p_results: std::ptr::null_mut(),
             ..Default::default()
@@ -1192,7 +1194,10 @@ impl SwapchainResizer {
                 swapchain_framebuffers.release_resources(&device);
                 swapchain_images.release_resources(&device);
                 swapchain_frame_state.release_resources(&device);
-                swapchain.resize(&instance, &physical_device, &device, &surface, &window);
+                *swapchain = SwapchainBuilder::new()
+                    .with_existing(&swapchain)
+                    .build(&instance, &physical_device, &device, &surface, &window)
+                    .unwrap();
                 *swapchain_images = SwapchainImages::new(&device, &swapchain);
                 *swapchain_framebuffers = SwapchainFramebuffers::new(
                     &device,
@@ -1207,6 +1212,29 @@ impl SwapchainResizer {
         } else {
             false
         }
+    }
+}
+
+pub struct PipelineCache {
+    cache: ash::vk::PipelineCache,
+}
+
+impl PipelineCache {
+    pub fn new(device: &Device) -> Self {
+        let pipeline_cache_create_info = ash::vk::PipelineCacheCreateInfo {
+            ..Default::default()
+        };
+        let cache = unsafe {
+            device
+                .device
+                .create_pipeline_cache(&pipeline_cache_create_info, None)
+                .expect("Failed to create pipeline cache")
+        };
+        PipelineCache { cache }
+    }
+
+    pub fn release_resources(&self, device: &Device) {
+        unsafe { device.device.destroy_pipeline_cache(self.cache, None) };
     }
 }
 
@@ -1270,12 +1298,110 @@ impl MemAllocator {
     }
 }
 
-pub struct Scene {
-    green: f32,
-    triangle_ready: bool,
-    triangle_vbuf: ash::vk::Buffer,
-    triangle_vbuf_alloc: vk_mem::Allocation,
+pub struct Shader {
+    module: ash::vk::ShaderModule,
+    stage: ash::vk::ShaderStageFlags,
 }
+
+impl Shader {
+    pub fn new(spv: &[u8], stage: ash::vk::ShaderStageFlags, device: &Device) -> Self {
+        let shader_module_create_info = ash::vk::ShaderModuleCreateInfo {
+            code_size: spv.len(),
+            p_code: spv.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        let module = unsafe {
+            device
+                .device
+                .create_shader_module(&shader_module_create_info, None)
+                .expect("Failed to create shader module")
+        };
+        Shader { module, stage }
+    }
+
+    pub fn release_resources(&self, device: &Device) {
+        unsafe { device.device.destroy_shader_module(self.module, None) };
+    }
+}
+
+pub struct GraphicsPipeline {
+    pipeline: ash::vk::Pipeline,
+}
+
+impl GraphicsPipeline {
+    pub fn release_resources(&self, device: &Device) {
+        unsafe { device.device.destroy_pipeline(self.pipeline, None) };
+    }
+}
+
+pub struct GraphicsPipelineBuilder<'a> {
+    shader_stages: smallvec::SmallVec<[&'a Shader; 4]>,
+    render_pass: Option<&'a ash::vk::RenderPass>,
+}
+
+impl<'a> GraphicsPipelineBuilder<'a> {
+    pub fn new() -> Self {
+        GraphicsPipelineBuilder {
+            shader_stages: smallvec::smallvec![],
+            render_pass: None,
+        }
+    }
+
+    pub fn with_shader_stages(&mut self, shaders: &[&'a Shader]) -> &mut Self {
+        for shader in shaders {
+            self.shader_stages.push(shader);
+        }
+        self
+    }
+
+    pub fn with_render_pass(&mut self, render_pass: &'a ash::vk::RenderPass) -> &mut Self {
+        self.render_pass = Some(render_pass);
+        self
+    }
+
+    pub fn build(
+        &self,
+        device: &Device,
+        pipeline_cache: &PipelineCache,
+    ) -> Result<GraphicsPipeline, ash::vk::Result> {
+        let mut stage_create_infos: smallvec::SmallVec<
+            [ash::vk::PipelineShaderStageCreateInfo; 4],
+        > = smallvec::smallvec![];
+        for shader in &self.shader_stages {
+            stage_create_infos.push(ash::vk::PipelineShaderStageCreateInfo {
+                stage: shader.stage,
+                module: shader.module,
+                p_name: DEFAULT_SHADER_ENTRY_POINT.as_ptr(),
+                ..Default::default()
+            });
+        }
+        let graphics_pipeline_create_info = ash::vk::GraphicsPipelineCreateInfo {
+            stage_count: stage_create_infos.len() as u32,
+            p_stages: stage_create_infos.as_ptr(),
+            render_pass: *self
+                .render_pass
+                .expect("No RenderPass specified for GraphicsPipeline, this is wrong"),
+            ..Default::default()
+        };
+        let create_infos = [graphics_pipeline_create_info];
+        // match unsafe {
+        //     device
+        //         .device
+        //         .create_graphics_pipelines(pipeline_cache.cache, &create_infos, None)
+        // } {
+        //     Ok(pipelines) => Ok(GraphicsPipeline {
+        //         pipeline: pipelines[0],
+        //     }),
+        //     Err((_, r)) => Err(r),
+        // }
+        Ok(GraphicsPipeline {
+            pipeline: ash::vk::Pipeline::null(),
+        })
+    }
+}
+
+const VS_COLOR: &[u8] = std::include_bytes!("shaders/color.vert.spv");
+const FS_COLOR: &[u8] = std::include_bytes!("shaders/color.frag.spv");
 
 #[repr(C)]
 struct TriangleVertex {
@@ -1294,6 +1420,14 @@ const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
     },
 ];
 
+pub struct Scene {
+    green: f32,
+    triangle_ready: bool,
+    triangle_vbuf: ash::vk::Buffer,
+    triangle_vbuf_alloc: vk_mem::Allocation,
+    color_pipeline: Option<GraphicsPipeline>,
+}
+
 impl Scene {
     pub fn new() -> Self {
         Scene {
@@ -1301,10 +1435,15 @@ impl Scene {
             triangle_ready: false,
             triangle_vbuf: ash::vk::Buffer::null(),
             triangle_vbuf_alloc: vk_mem::Allocation::null(),
+            color_pipeline: None,
         }
     }
 
-    pub fn release_resources(&self, allocator: &MemAllocator) {
+    pub fn release_resources(&mut self, device: &Device, allocator: &MemAllocator) {
+        match &self.color_pipeline {
+            Some(pipeline) => pipeline.release_resources(device),
+            _ => (),
+        };
         allocator.destroy_buffer(self.triangle_vbuf, &self.triangle_vbuf_alloc);
     }
 
@@ -1316,8 +1455,10 @@ impl Scene {
         &mut self,
         device: &Device,
         swapchain: &Swapchain,
+        swapchain_render_pass: &SwapchainRenderPass,
         command_list: &CommandList,
         allocator: &MemAllocator,
+        pipeline_cache: &PipelineCache,
     ) {
         if !self.triangle_ready {
             let (buf, alloc) = allocator
@@ -1329,7 +1470,7 @@ impl Scene {
                     unsafe {
                         p.copy_from_nonoverlapping(
                             TRIANGLE_VERTICES.as_ptr() as *const u8,
-                            copy_len
+                            copy_len,
                         )
                     };
                 }
@@ -1342,6 +1483,21 @@ impl Scene {
                 .unwrap();
             self.triangle_vbuf = buf;
             self.triangle_vbuf_alloc = alloc;
+
+            let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, &device);
+            let color_fs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, &device);
+            let color_shaders = [&color_vs, &color_fs];
+            let mut pipeline_builder = GraphicsPipelineBuilder::new();
+            self.color_pipeline = Some(
+                pipeline_builder
+                    .with_shader_stages(&color_shaders)
+                    .with_render_pass(&swapchain_render_pass.render_pass)
+                    .build(device, pipeline_cache)
+                    .expect("Failed to build simple graphics pipeline"),
+            );
+            color_fs.release_resources(device);
+            color_vs.release_resources(device);
+
             self.triangle_ready = true;
         }
     }
@@ -1371,119 +1527,183 @@ impl Scene {
     }
 }
 
-fn main() {
-    let event_loop = winit::event_loop::EventLoop::new();
+pub struct App {
+    window: winit::window::Window,
+    instance: Instance,
+    surface: WindowSurface,
+    physical_device: PhysicalDevice,
+    device: Device,
+    command_pool: CommandPool,
+    command_list: CommandList,
+    swapchain: Swapchain,
+    swapchain_images: SwapchainImages,
+    swapchain_render_pass: SwapchainRenderPass,
+    swapchain_framebuffers: SwapchainFramebuffers,
+    swapchain_frame_state: SwapchainFrameState,
+    swapchain_resizer: SwapchainResizer,
+    allocator: MemAllocator,
+    pipeline_cache: PipelineCache,
+    scene: Scene,
+}
 
-    let window = winit::window::WindowBuilder::new()
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
-        .build(&event_loop)
-        .expect("Failed to create window");
+impl App {
+    pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
+        let window = winit::window::WindowBuilder::new()
+            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+            .build(event_loop)
+            .expect("Failed to create window");
+        let instance = Instance::new(&window, ENABLE_VALIDATION);
+        let surface = WindowSurface::new(&instance, &window);
+        let physical_device = PhysicalDevice::new(&instance, &surface.surface);
+        let device = Device::new(&instance, &physical_device);
+        let command_pool = CommandPool::new(&physical_device, &device);
+        let command_list = CommandList::new(&device, &command_pool);
+        let swapchain = SwapchainBuilder::new()
+            .build(&instance, &physical_device, &device, &surface, &window)
+            .unwrap();
+        let swapchain_images = SwapchainImages::new(&device, &swapchain);
+        let swapchain_render_pass = SwapchainRenderPass::new(&device, &swapchain);
+        let swapchain_framebuffers = SwapchainFramebuffers::new(
+            &device,
+            &swapchain,
+            &swapchain_images,
+            &swapchain_render_pass,
+        );
+        let swapchain_frame_state = SwapchainFrameState::new(&device);
+        let swapchain_resizer = SwapchainResizer::new();
+        let allocator = MemAllocator::new(&instance, &physical_device, &device);
+        let pipeline_cache = PipelineCache::new(&device);
+        let scene = Scene::new();
+        App {
+            window,
+            instance,
+            surface,
+            physical_device,
+            device,
+            command_pool,
+            command_list,
+            swapchain,
+            swapchain_images,
+            swapchain_render_pass,
+            swapchain_framebuffers,
+            swapchain_frame_state,
+            swapchain_resizer,
+            allocator,
+            pipeline_cache,
+            scene,
+        }
+    }
 
-    let instance = Instance::new(&window, ENABLE_VALIDATION);
-    let surface = WindowSurface::new(&instance, &window);
-    let physical_device = PhysicalDevice::new(&instance, &surface.surface);
-    let device = Device::new(&instance, &physical_device);
-    let command_pool = CommandPool::new(&physical_device, &device);
-    let command_list = CommandList::new(&device, &command_pool);
-    let mut swapchain = Swapchain::new();
-    swapchain.resize(&instance, &physical_device, &device, &surface, &window);
-    let mut swapchain_images = SwapchainImages::new(&device, &swapchain);
-    let swapchain_render_pass = SwapchainRenderPass::new(&device, &swapchain);
-    let mut swapchain_framebuffers = SwapchainFramebuffers::new(
-        &device,
-        &swapchain,
-        &swapchain_images,
-        &swapchain_render_pass,
-    );
-    let mut swapchain_frame_state = SwapchainFrameState::new(&device);
-    let mut swapchain_resizer = SwapchainResizer::new();
-    let mut allocator = MemAllocator::new(&instance, &physical_device, &device);
-    let mut running = true;
-    let mut frame_time = std::time::Instant::now();
+    fn release_resources(&mut self) {
+        self.device.wait_idle();
+        self.scene.release_resources(&self.device, &self.allocator);
+        self.swapchain_frame_state.release_resources(&self.device);
+        self.swapchain_framebuffers.release_resources(&self.device);
+        self.swapchain_render_pass.release_resources(&self.device);
+        self.swapchain_images.release_resources(&self.device);
+        self.swapchain.release_resources(&self.device);
+        self.command_pool.release_resources(&self.device);
+        self.pipeline_cache.release_resources(&self.device);
+        self.allocator.release_resources();
+        self.device.release_resources();
+        self.surface.release_resources(&self.instance);
+        self.instance.release_resources();
+    }
 
-    let mut scene = Scene::new();
+    fn ensure_swapchain(&mut self) -> bool {
+        return self.swapchain_resizer.ensure_up_to_date(
+            &self.instance,
+            &self.physical_device,
+            &self.surface,
+            &self.window,
+            &self.device,
+            &mut self.swapchain,
+            &self.swapchain_render_pass,
+            &mut self.swapchain_images,
+            &mut self.swapchain_framebuffers,
+            &mut self.swapchain_frame_state,
+        );
+    }
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = winit::event_loop::ControlFlow::Poll;
-        match event {
-            winit::event::Event::WindowEvent { window_id, event } if window_id == window.id() => {
-                match event {
-                    winit::event::WindowEvent::CloseRequested => {
-                        *control_flow = winit::event_loop::ControlFlow::Exit;
-                        running = false;
-                        scene.release_resources(&allocator);
-                        swapchain_frame_state.release_resources(&device);
-                        swapchain_framebuffers.release_resources(&device);
-                        swapchain_render_pass.release_resources(&device);
-                        swapchain_images.release_resources(&device);
-                        swapchain.release_resources(&device);
-                        command_pool.release_resources(&device);
-                        allocator.release_resources();
-                        device.release_resources();
-                        surface.release_resources(&instance);
-                        instance.release_resources();
-                    }
-                    _ => (),
-                }
-            }
-            winit::event::Event::MainEventsCleared => {
-                if scene.sync() {
-                    window.request_redraw();
-                }
-            }
-            winit::event::Event::RedrawRequested(window_id)
-                if window_id == window.id() && running =>
-            {
-                if swapchain_resizer.ensure_up_to_date(
-                    &instance,
-                    &physical_device,
-                    &surface,
-                    &window,
-                    &device,
-                    &mut swapchain,
-                    &swapchain_render_pass,
-                    &mut swapchain_images,
-                    &mut swapchain_framebuffers,
-                    &mut swapchain_frame_state,
-                ) {
-                    match swapchain_frame_state.begin_frame(
-                        &device,
-                        &swapchain,
-                        &command_pool,
-                        &command_list,
-                    ) {
-                        Ok(current_frame_slot) => {
-                            println!(
-                                "Render, elapsed since last {:?} (slot {})",
-                                frame_time.elapsed(),
-                                current_frame_slot
-                            );
-                            frame_time = std::time::Instant::now();
-                            scene.prepare(&device, &swapchain, &command_list, &allocator);
-                            scene.render(
-                                &device,
-                                &swapchain,
-                                &swapchain_framebuffers,
-                                &swapchain_render_pass,
-                                &mut swapchain_frame_state,
-                                &command_list,
-                            );
-                            swapchain_frame_state.end_frame(
-                                &device,
-                                &swapchain,
-                                &swapchain_images,
-                                &command_list,
-                            );
+    pub fn run(mut self, event_loop: winit::event_loop::EventLoop<()>) {
+        let mut running = true;
+        let mut frame_time = std::time::Instant::now();
+        event_loop.run(move |event, _, control_flow| {
+            *control_flow = winit::event_loop::ControlFlow::Poll;
+            match event {
+                winit::event::Event::WindowEvent { window_id, event }
+                    if window_id == self.window.id() =>
+                {
+                    match event {
+                        winit::event::WindowEvent::CloseRequested => {
+                            *control_flow = winit::event_loop::ControlFlow::Exit;
+                            running = false;
+                            self.release_resources();
                         }
-                        Err(r) => {
-                            if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
-                                panic!(r)
+                        _ => (),
+                    }
+                }
+                winit::event::Event::MainEventsCleared => {
+                    if self.scene.sync() {
+                        self.window.request_redraw();
+                    }
+                }
+                winit::event::Event::RedrawRequested(window_id)
+                    if window_id == self.window.id() && running =>
+                {
+                    if self.ensure_swapchain() {
+                        match self.swapchain_frame_state.begin_frame(
+                            &self.device,
+                            &self.swapchain,
+                            &self.command_pool,
+                            &self.command_list,
+                        ) {
+                            Ok(current_frame_slot) => {
+                                println!(
+                                    "Render, elapsed since last {:?} (slot {})",
+                                    frame_time.elapsed(),
+                                    current_frame_slot
+                                );
+                                frame_time = std::time::Instant::now();
+                                self.scene.prepare(
+                                    &self.device,
+                                    &self.swapchain,
+                                    &self.swapchain_render_pass,
+                                    &self.command_list,
+                                    &self.allocator,
+                                    &self.pipeline_cache,
+                                );
+                                self.scene.render(
+                                    &self.device,
+                                    &self.swapchain,
+                                    &self.swapchain_framebuffers,
+                                    &self.swapchain_render_pass,
+                                    &mut self.swapchain_frame_state,
+                                    &self.command_list,
+                                );
+                                self.swapchain_frame_state.end_frame(
+                                    &self.device,
+                                    &self.swapchain,
+                                    &self.swapchain_images,
+                                    &self.command_list,
+                                );
+                            }
+                            Err(r) => {
+                                if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
+                                    panic!(r)
+                                }
                             }
                         }
                     }
                 }
-            }
-            _ => (),
-        };
-    });
+                _ => (),
+            };
+        });
+    }
+}
+
+fn main() {
+    let event_loop = winit::event_loop::EventLoop::new();
+    let app = App::new(&event_loop);
+    app.run(event_loop);
 }
