@@ -1820,17 +1820,21 @@ const FS_COLOR: &[u8] = std::include_bytes!("shaders/color.frag.spv");
 #[repr(C)]
 struct TriangleVertex {
     pos: [f32; 3],
+    color: [f32; 3],
 }
 
 const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
     TriangleVertex {
         pos: [-0.5, -0.5, 0.0],
+        color: [1.0, 0.0, 0.0],
     },
     TriangleVertex {
         pos: [0.0, 0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
     },
     TriangleVertex {
         pos: [0.5, -0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
     },
 ];
 
@@ -1947,28 +1951,28 @@ impl Scene {
                 .expect("Failed to allocate descriptor sets for triangle");
 
             let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
-            let color_fs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
+            let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
             let color_shaders = [&color_vs, &color_fs];
 
             self.color_pipeline_layout = Some(PipelineLayout::new(device, &[], &[]));
 
             let vertex_bindings = [ash::vk::VertexInputBindingDescription {
                 binding: 0,
-                stride: 5 * std::mem::size_of::<f32>() as u32,
+                stride: 6 * std::mem::size_of::<f32>() as u32,
                 ..Default::default()
             }];
             let vertex_attributes = [
                 ash::vk::VertexInputAttributeDescription {
                     location: 0,
                     binding: 0,
-                    format: ash::vk::Format::R32G32_SFLOAT,
+                    format: ash::vk::Format::R32G32B32_SFLOAT,
                     offset: 0,
                 },
                 ash::vk::VertexInputAttributeDescription {
                     location: 1,
                     binding: 0,
                     format: ash::vk::Format::R32G32B32_SFLOAT,
-                    offset: 2 * std::mem::size_of::<f32>() as u32,
+                    offset: 3 * std::mem::size_of::<f32>() as u32,
                 },
             ];
 
