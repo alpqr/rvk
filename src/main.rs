@@ -1473,6 +1473,86 @@ impl Drop for MemAllocator {
     }
 }
 
+pub struct DescriptorSetLayout {
+    layout: ash::vk::DescriptorSetLayout,
+    device: Option<Rc<Device>>
+}
+
+impl DescriptorSetLayout {
+    pub fn new(device: &Rc<Device>, bindings: &[ash::vk::DescriptorSetLayoutBinding]) -> Self {
+        let layout_create_info = ash::vk::DescriptorSetLayoutCreateInfo {
+            binding_count: bindings.len() as u32,
+            p_bindings: bindings.as_ptr(),
+            ..Default::default()
+        };
+        let layout = unsafe { device.device.create_descriptor_set_layout(&layout_create_info, None).expect("Failed to create descriptor set layout") };
+        DescriptorSetLayout {
+            layout,
+            device: Some(device.clone())
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            unsafe { self.device.as_ref().unwrap().device.destroy_descriptor_set_layout(self.layout, None) };
+            self.device = None;
+        }
+        self.layout = ash::vk::DescriptorSetLayout::null();
+    }
+}
+
+impl Drop for DescriptorSetLayout {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
+
+pub struct DescriptorPool {
+    pool: ash::vk::DescriptorPool,
+    device: Option<Rc<Device>>
+}
+
+impl DescriptorPool {
+    pub fn new(device: &Rc<Device>, max_sets: u32, sizes: &[ash::vk::DescriptorPoolSize]) -> Self {
+        let pool_create_info = ash::vk::DescriptorPoolCreateInfo {
+            max_sets,
+            pool_size_count: sizes.len() as u32,
+            p_pool_sizes: sizes.as_ptr(),
+            ..Default::default()
+        };
+        let pool = unsafe { device.device.create_descriptor_pool(&pool_create_info, None).expect("Failed to create descriptor pool") };
+        DescriptorPool {
+            pool,
+            device: Some(device.clone())
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            unsafe { self.device.as_ref().unwrap().device.destroy_descriptor_pool(self.pool, None) };
+            self.device = None;
+        }
+        self.pool = ash::vk::DescriptorPool::null();
+    }
+
+    pub fn allocate(&self, layouts: &[&DescriptorSetLayout]) -> Result<Vec<ash::vk::DescriptorSet>, ash::vk::Result> {
+        let set_layouts: smallvec::SmallVec::<[ash::vk::DescriptorSetLayout; 8]> = layouts.iter().map(|layout| layout.layout).collect();
+        let allocate_info = ash::vk::DescriptorSetAllocateInfo {
+            descriptor_pool: self.pool,
+            descriptor_set_count: set_layouts.len() as u32,
+            p_set_layouts: set_layouts.as_ptr(),
+            ..Default::default()
+        };
+        unsafe { self.device.as_ref().unwrap().device.allocate_descriptor_sets(&allocate_info) }
+    }
+}
+
+impl Drop for DescriptorPool {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
+
 pub struct Shader {
     module: ash::vk::ShaderModule,
     stage: ash::vk::ShaderStageFlags,
@@ -1515,6 +1595,43 @@ impl Shader {
 }
 
 impl Drop for Shader {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
+
+pub struct PipelineLayout {
+    layout: ash::vk::PipelineLayout,
+    device: Option<Rc<Device>>
+}
+
+impl PipelineLayout {
+    pub fn new(device: &Rc<Device>, desc_set_layouts: &[&DescriptorSetLayout], push_constant_ranges: &[ash::vk::PushConstantRange]) -> Self {
+        let set_layouts: smallvec::SmallVec::<[ash::vk::DescriptorSetLayout; 8]> = desc_set_layouts.iter().map(|layout| layout.layout).collect();
+        let layout_create_info = ash::vk::PipelineLayoutCreateInfo {
+            set_layout_count: set_layouts.len() as u32,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: push_constant_ranges.len() as u32,
+            p_push_constant_ranges: push_constant_ranges.as_ptr(),
+            ..Default::default()
+        };
+        let layout = unsafe { device.device.create_pipeline_layout(&layout_create_info, None).expect("Failed to create pipeline layout") };
+        PipelineLayout {
+            layout,
+            device: Some(device.clone())
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            unsafe { self.device.as_ref().unwrap().device.destroy_pipeline_layout(self.layout, None) };
+            self.device = None;
+        }
+        self.layout = ash::vk::PipelineLayout::null();
+    }
+}
+
+impl Drop for PipelineLayout {
     fn drop(&mut self) {
         self.release_resources();
     }
