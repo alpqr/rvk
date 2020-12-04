@@ -1475,7 +1475,7 @@ impl Drop for MemAllocator {
 
 pub struct DescriptorSetLayout {
     layout: ash::vk::DescriptorSetLayout,
-    device: Option<Rc<Device>>
+    device: Option<Rc<Device>>,
 }
 
 impl DescriptorSetLayout {
@@ -1485,16 +1485,27 @@ impl DescriptorSetLayout {
             p_bindings: bindings.as_ptr(),
             ..Default::default()
         };
-        let layout = unsafe { device.device.create_descriptor_set_layout(&layout_create_info, None).expect("Failed to create descriptor set layout") };
+        let layout = unsafe {
+            device
+                .device
+                .create_descriptor_set_layout(&layout_create_info, None)
+                .expect("Failed to create descriptor set layout")
+        };
         DescriptorSetLayout {
             layout,
-            device: Some(device.clone())
+            device: Some(device.clone()),
         }
     }
 
     pub fn release_resources(&mut self) {
         if self.device.is_some() {
-            unsafe { self.device.as_ref().unwrap().device.destroy_descriptor_set_layout(self.layout, None) };
+            unsafe {
+                self.device
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_descriptor_set_layout(self.layout, None)
+            };
             self.device = None;
         }
         self.layout = ash::vk::DescriptorSetLayout::null();
@@ -1509,7 +1520,7 @@ impl Drop for DescriptorSetLayout {
 
 pub struct DescriptorPool {
     pool: ash::vk::DescriptorPool,
-    device: Option<Rc<Device>>
+    device: Option<Rc<Device>>,
 }
 
 impl DescriptorPool {
@@ -1520,30 +1531,51 @@ impl DescriptorPool {
             p_pool_sizes: sizes.as_ptr(),
             ..Default::default()
         };
-        let pool = unsafe { device.device.create_descriptor_pool(&pool_create_info, None).expect("Failed to create descriptor pool") };
+        let pool = unsafe {
+            device
+                .device
+                .create_descriptor_pool(&pool_create_info, None)
+                .expect("Failed to create descriptor pool")
+        };
         DescriptorPool {
             pool,
-            device: Some(device.clone())
+            device: Some(device.clone()),
         }
     }
 
     pub fn release_resources(&mut self) {
         if self.device.is_some() {
-            unsafe { self.device.as_ref().unwrap().device.destroy_descriptor_pool(self.pool, None) };
+            unsafe {
+                self.device
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_descriptor_pool(self.pool, None)
+            };
             self.device = None;
         }
         self.pool = ash::vk::DescriptorPool::null();
     }
 
-    pub fn allocate(&self, layouts: &[&DescriptorSetLayout]) -> Result<Vec<ash::vk::DescriptorSet>, ash::vk::Result> {
-        let set_layouts: smallvec::SmallVec::<[ash::vk::DescriptorSetLayout; 8]> = layouts.iter().map(|layout| layout.layout).collect();
+    pub fn allocate(
+        &self,
+        layouts: &[&DescriptorSetLayout],
+    ) -> Result<Vec<ash::vk::DescriptorSet>, ash::vk::Result> {
+        let set_layouts: smallvec::SmallVec<[ash::vk::DescriptorSetLayout; 8]> =
+            layouts.iter().map(|layout| layout.layout).collect();
         let allocate_info = ash::vk::DescriptorSetAllocateInfo {
             descriptor_pool: self.pool,
             descriptor_set_count: set_layouts.len() as u32,
             p_set_layouts: set_layouts.as_ptr(),
             ..Default::default()
         };
-        unsafe { self.device.as_ref().unwrap().device.allocate_descriptor_sets(&allocate_info) }
+        unsafe {
+            self.device
+                .as_ref()
+                .unwrap()
+                .device
+                .allocate_descriptor_sets(&allocate_info)
+        }
     }
 }
 
@@ -1602,12 +1634,19 @@ impl Drop for Shader {
 
 pub struct PipelineLayout {
     layout: ash::vk::PipelineLayout,
-    device: Option<Rc<Device>>
+    device: Option<Rc<Device>>,
 }
 
 impl PipelineLayout {
-    pub fn new(device: &Rc<Device>, desc_set_layouts: &[&DescriptorSetLayout], push_constant_ranges: &[ash::vk::PushConstantRange]) -> Self {
-        let set_layouts: smallvec::SmallVec::<[ash::vk::DescriptorSetLayout; 8]> = desc_set_layouts.iter().map(|layout| layout.layout).collect();
+    pub fn new(
+        device: &Rc<Device>,
+        desc_set_layouts: &[&DescriptorSetLayout],
+        push_constant_ranges: &[ash::vk::PushConstantRange],
+    ) -> Self {
+        let set_layouts: smallvec::SmallVec<[ash::vk::DescriptorSetLayout; 8]> = desc_set_layouts
+            .iter()
+            .map(|layout| layout.layout)
+            .collect();
         let layout_create_info = ash::vk::PipelineLayoutCreateInfo {
             set_layout_count: set_layouts.len() as u32,
             p_set_layouts: set_layouts.as_ptr(),
@@ -1615,16 +1654,27 @@ impl PipelineLayout {
             p_push_constant_ranges: push_constant_ranges.as_ptr(),
             ..Default::default()
         };
-        let layout = unsafe { device.device.create_pipeline_layout(&layout_create_info, None).expect("Failed to create pipeline layout") };
+        let layout = unsafe {
+            device
+                .device
+                .create_pipeline_layout(&layout_create_info, None)
+                .expect("Failed to create pipeline layout")
+        };
         PipelineLayout {
             layout,
-            device: Some(device.clone())
+            device: Some(device.clone()),
         }
     }
 
     pub fn release_resources(&mut self) {
         if self.device.is_some() {
-            unsafe { self.device.as_ref().unwrap().device.destroy_pipeline_layout(self.layout, None) };
+            unsafe {
+                self.device
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_pipeline_layout(self.layout, None)
+            };
             self.device = None;
         }
         self.layout = ash::vk::PipelineLayout::null();
@@ -1666,14 +1716,20 @@ impl Drop for GraphicsPipeline {
 
 pub struct GraphicsPipelineBuilder<'a> {
     shader_stages: smallvec::SmallVec<[&'a Shader; 4]>,
+    layout: Option<&'a PipelineLayout>,
     render_pass: Option<&'a ash::vk::RenderPass>,
+    vertex_input_bindings: smallvec::SmallVec<[ash::vk::VertexInputBindingDescription; 4]>,
+    vertex_input_attributes: smallvec::SmallVec<[ash::vk::VertexInputAttributeDescription; 8]>,
 }
 
 impl<'a> GraphicsPipelineBuilder<'a> {
     pub fn new() -> Self {
         GraphicsPipelineBuilder {
             shader_stages: smallvec::smallvec![],
+            layout: None,
             render_pass: None,
+            vertex_input_bindings: smallvec::smallvec![],
+            vertex_input_attributes: smallvec::smallvec![],
         }
     }
 
@@ -1684,8 +1740,23 @@ impl<'a> GraphicsPipelineBuilder<'a> {
         self
     }
 
+    pub fn with_layout(&mut self, layout: &'a PipelineLayout) -> &mut Self {
+        self.layout = Some(layout);
+        self
+    }
+
     pub fn with_render_pass(&mut self, render_pass: &'a ash::vk::RenderPass) -> &mut Self {
         self.render_pass = Some(render_pass);
+        self
+    }
+
+    pub fn with_vertex_input_layout(
+        &mut self,
+        bindings: &[ash::vk::VertexInputBindingDescription],
+        attributes: &[ash::vk::VertexInputAttributeDescription],
+    ) -> &mut Self {
+        self.vertex_input_bindings = bindings.iter().map(|b| *b).collect();
+        self.vertex_input_attributes = attributes.iter().map(|a| *a).collect();
         self
     }
 
@@ -1705,12 +1776,24 @@ impl<'a> GraphicsPipelineBuilder<'a> {
                 ..Default::default()
             });
         }
+        let vertex_input_state_create_info = ash::vk::PipelineVertexInputStateCreateInfo {
+            vertex_binding_description_count: self.vertex_input_bindings.len() as u32,
+            p_vertex_binding_descriptions: self.vertex_input_bindings.as_ptr(),
+            vertex_attribute_description_count: self.vertex_input_attributes.len() as u32,
+            p_vertex_attribute_descriptions: self.vertex_input_attributes.as_ptr(),
+            ..Default::default()
+        };
         let graphics_pipeline_create_info = ash::vk::GraphicsPipelineCreateInfo {
             stage_count: stage_create_infos.len() as u32,
             p_stages: stage_create_infos.as_ptr(),
+            p_vertex_input_state: &vertex_input_state_create_info,
+            layout: self
+                .layout
+                .expect("No layout specified for GraphicsPipeline")
+                .layout,
             render_pass: *self
                 .render_pass
-                .expect("No RenderPass specified for GraphicsPipeline, this is wrong"),
+                .expect("No renderpass specified for GraphicsPipeline"),
             ..Default::default()
         };
         let create_infos = [graphics_pipeline_create_info];
@@ -1756,7 +1839,11 @@ pub struct Scene {
     triangle_ready: bool,
     triangle_vbuf: ash::vk::Buffer,
     triangle_vbuf_alloc: vk_mem::Allocation,
+    color_pipeline_layout: Option<PipelineLayout>,
     color_pipeline: Option<GraphicsPipeline>,
+    descriptor_pool: Option<DescriptorPool>,
+    color_desc_set_layout: Option<DescriptorSetLayout>,
+    triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
     device: Option<Rc<Device>>,
     allocator: Option<Rc<MemAllocator>>,
 }
@@ -1768,14 +1855,21 @@ impl Scene {
             triangle_ready: false,
             triangle_vbuf: ash::vk::Buffer::null(),
             triangle_vbuf_alloc: vk_mem::Allocation::null(),
+            color_pipeline_layout: None,
             color_pipeline: None,
+            descriptor_pool: None,
+            color_desc_set_layout: None,
+            triangle_desc_sets: vec![],
             device: Some(device.clone()),
             allocator: Some(allocator.clone()),
         }
     }
 
     pub fn release_resources(&mut self) {
+        self.color_desc_set_layout = None;
+        self.descriptor_pool = None;
         self.color_pipeline = None;
+        self.color_pipeline_layout = None;
         if self.allocator.is_some() {
             let allocator = self.allocator.as_ref().unwrap();
             allocator.destroy_buffer(self.triangle_vbuf, &self.triangle_vbuf_alloc);
@@ -1821,14 +1915,70 @@ impl Scene {
             self.triangle_vbuf = buf;
             self.triangle_vbuf_alloc = alloc;
 
+            let desc_set_sizes = [ash::vk::DescriptorPoolSize {
+                ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: FRAMES_IN_FLIGHT,
+            }];
+            self.descriptor_pool = Some(DescriptorPool::new(
+                device,
+                FRAMES_IN_FLIGHT,
+                &desc_set_sizes,
+            ));
+            let descriptor_pool = self.descriptor_pool.as_ref().unwrap();
+
+            let color_desc_set_layout_bindings = [ash::vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                stage_flags: ash::vk::ShaderStageFlags::VERTEX
+                    | ash::vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            }];
+            self.color_desc_set_layout = Some(DescriptorSetLayout::new(
+                device,
+                &color_desc_set_layout_bindings,
+            ));
+            let color_desc_set_layout = self.color_desc_set_layout.as_ref().unwrap();
+
+            let color_desc_set_alloc_layouts: [&DescriptorSetLayout; FRAMES_IN_FLIGHT as usize] =
+                [color_desc_set_layout; FRAMES_IN_FLIGHT as usize];
+            self.triangle_desc_sets = descriptor_pool
+                .allocate(&color_desc_set_alloc_layouts)
+                .expect("Failed to allocate descriptor sets for triangle");
+
             let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
             let color_fs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
             let color_shaders = [&color_vs, &color_fs];
+
+            self.color_pipeline_layout = Some(PipelineLayout::new(device, &[], &[]));
+
+            let vertex_bindings = [ash::vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: 5 * std::mem::size_of::<f32>() as u32,
+                ..Default::default()
+            }];
+            let vertex_attributes = [
+                ash::vk::VertexInputAttributeDescription {
+                    location: 0,
+                    binding: 0,
+                    format: ash::vk::Format::R32G32_SFLOAT,
+                    offset: 0,
+                },
+                ash::vk::VertexInputAttributeDescription {
+                    location: 1,
+                    binding: 0,
+                    format: ash::vk::Format::R32G32B32_SFLOAT,
+                    offset: 2 * std::mem::size_of::<f32>() as u32,
+                },
+            ];
+
             let mut pipeline_builder = GraphicsPipelineBuilder::new();
             self.color_pipeline = Some(
                 pipeline_builder
                     .with_shader_stages(&color_shaders)
+                    .with_layout(&self.color_pipeline_layout.as_ref().unwrap())
                     .with_render_pass(&swapchain_render_pass.render_pass)
+                    .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
                     .build(device, pipeline_cache)
                     .expect("Failed to build simple graphics pipeline"),
             );
