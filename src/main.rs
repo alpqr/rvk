@@ -1437,11 +1437,11 @@ impl MemAllocator {
 
     pub fn create_host_visible_buffer(
         &self,
-        size: u64,
+        size: usize,
         usage: ash::vk::BufferUsageFlags,
     ) -> Result<(ash::vk::Buffer, vk_mem::Allocation), vk_mem::Error> {
         let buffer_create_info = ash::vk::BufferCreateInfo {
-            size,
+            size: size as u64,
             usage,
             sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
             ..Default::default()
@@ -2023,26 +2023,25 @@ impl Scene {
                 45.0f32.to_radians(),
                 self.output_pixel_size.width as f32,
                 self.output_pixel_size.height as f32,
-                0.01f32,
-                1000.0f32,
+                0.01,
+                1000.0,
             );
-            self.projection[5] *= -1.0f32; // vertex data is Y up
+            self.projection[5] *= -1.0; // vertex data is Y up
         }
 
         if !self.triangle_ready {
+            let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
             self.triangle_vbuf = allocator
-                .create_host_visible_buffer(256, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
+                .create_host_visible_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
                 .unwrap();
-            let copy_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
             allocator.update_host_visible(
                 &self.triangle_vbuf.1,
                 0,
-                copy_len,
-                &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, copy_len)],
+                vbuf_len,
+                &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
             );
 
-            self.triangle_view =
-                glm::translate(&glm::identity(), &glm::vec3(0.0f32, 0.0f32, -4.0f32));
+            self.triangle_view = glm::translate(&glm::identity(), &glm::vec3(0.0, 0.0, -4.0));
 
             for i in 0..FRAMES_IN_FLIGHT {
                 self.triangle_ubufs[i as usize] = allocator
@@ -2148,7 +2147,7 @@ impl Scene {
         let triangle_model = glm::rotate(
             &glm::identity(),
             self.triangle_rotation.to_radians(),
-            &glm::vec3(0.0f32, 1.0f32, 0.0f32),
+            &glm::vec3(0.0, 1.0, 0.0),
         );
         let mvp = self.projection * self.triangle_view * triangle_model;
         allocator.update_host_visible(
