@@ -1720,6 +1720,9 @@ pub struct GraphicsPipelineBuilder<'a> {
     render_pass: Option<&'a ash::vk::RenderPass>,
     vertex_input_bindings: smallvec::SmallVec<[ash::vk::VertexInputBindingDescription; 4]>,
     vertex_input_attributes: smallvec::SmallVec<[ash::vk::VertexInputAttributeDescription; 8]>,
+    topology: ash::vk::PrimitiveTopology,
+    cull_mode: ash::vk::CullModeFlags,
+    front_face: ash::vk::FrontFace,
 }
 
 impl<'a> GraphicsPipelineBuilder<'a> {
@@ -1730,6 +1733,9 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             render_pass: None,
             vertex_input_bindings: smallvec::smallvec![],
             vertex_input_attributes: smallvec::smallvec![],
+            topology: ash::vk::PrimitiveTopology::TRIANGLE_LIST,
+            cull_mode: ash::vk::CullModeFlags::BACK,
+            front_face: ash::vk::FrontFace::COUNTER_CLOCKWISE,
         }
     }
 
@@ -1760,33 +1766,100 @@ impl<'a> GraphicsPipelineBuilder<'a> {
         self
     }
 
+    pub fn with_topology(&mut self, topology: ash::vk::PrimitiveTopology) -> &mut Self {
+        self.topology = topology;
+        self
+    }
+
+    pub fn with_cull_mode(&mut self, cull_mode: ash::vk::CullModeFlags) -> &mut Self {
+        self.cull_mode = cull_mode;
+        self
+    }
+
+    pub fn with_front_face(&mut self, front_face: ash::vk::FrontFace) -> &mut Self {
+        self.front_face = front_face;
+        self
+    }
+
     pub fn build(
         &self,
         device: &Rc<Device>,
         pipeline_cache: &PipelineCache,
     ) -> Result<GraphicsPipeline, ash::vk::Result> {
-        let mut stage_create_infos: smallvec::SmallVec<
-            [ash::vk::PipelineShaderStageCreateInfo; 4],
-        > = smallvec::smallvec![];
+        let mut stages: smallvec::SmallVec<[ash::vk::PipelineShaderStageCreateInfo; 4]> =
+            smallvec::smallvec![];
         for shader in &self.shader_stages {
-            stage_create_infos.push(ash::vk::PipelineShaderStageCreateInfo {
+            stages.push(ash::vk::PipelineShaderStageCreateInfo {
                 stage: shader.stage,
                 module: shader.module,
                 p_name: DEFAULT_SHADER_ENTRY_POINT.as_ptr(),
                 ..Default::default()
             });
         }
-        let vertex_input_state_create_info = ash::vk::PipelineVertexInputStateCreateInfo {
+        let vertex_input_state = ash::vk::PipelineVertexInputStateCreateInfo {
             vertex_binding_description_count: self.vertex_input_bindings.len() as u32,
             p_vertex_binding_descriptions: self.vertex_input_bindings.as_ptr(),
             vertex_attribute_description_count: self.vertex_input_attributes.len() as u32,
             p_vertex_attribute_descriptions: self.vertex_input_attributes.as_ptr(),
             ..Default::default()
         };
+        let primitive_restart_enable = match self.topology {
+            ash::vk::PrimitiveTopology::LINE_STRIP
+            | ash::vk::PrimitiveTopology::TRIANGLE_STRIP
+            | ash::vk::PrimitiveTopology::TRIANGLE_FAN => ash::vk::TRUE,
+            _ => ash::vk::FALSE,
+        };
+        let input_assembly_state = ash::vk::PipelineInputAssemblyStateCreateInfo {
+            topology: self.topology,
+            primitive_restart_enable,
+            ..Default::default()
+        };
+        let viewport_state = ash::vk::PipelineViewportStateCreateInfo {
+            viewport_count: 1,
+            scissor_count: 1,
+            ..Default::default()
+        };
+        let rasterization_state = ash::vk::PipelineRasterizationStateCreateInfo {
+            cull_mode: self.cull_mode,
+            front_face: self.front_face,
+            line_width: 1.0,
+            ..Default::default()
+        };
+        let multisample_state = ash::vk::PipelineMultisampleStateCreateInfo {
+            rasterization_samples: ash::vk::SampleCountFlags::TYPE_1,
+            ..Default::default()
+        };
+        let depth_stencil_state = ash::vk::PipelineDepthStencilStateCreateInfo {
+            ..Default::default()
+        };
+        let color_blend_attachment_list = [ash::vk::PipelineColorBlendAttachmentState {
+            ..Default::default()
+        }];
+        let color_blend_state = ash::vk::PipelineColorBlendStateCreateInfo {
+            attachment_count: color_blend_attachment_list.len() as u32,
+            p_attachments: color_blend_attachment_list.as_ptr(),
+            ..Default::default()
+        };
+        let dynamic_state_list = [
+            ash::vk::DynamicState::VIEWPORT,
+            ash::vk::DynamicState::SCISSOR,
+        ];
+        let dynamic_state = ash::vk::PipelineDynamicStateCreateInfo {
+            dynamic_state_count: dynamic_state_list.len() as u32,
+            p_dynamic_states: dynamic_state_list.as_ptr(),
+            ..Default::default()
+        };
         let graphics_pipeline_create_info = ash::vk::GraphicsPipelineCreateInfo {
-            stage_count: stage_create_infos.len() as u32,
-            p_stages: stage_create_infos.as_ptr(),
-            p_vertex_input_state: &vertex_input_state_create_info,
+            stage_count: stages.len() as u32,
+            p_stages: stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_state,
+            p_input_assembly_state: &input_assembly_state,
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterization_state,
+            p_multisample_state: &multisample_state,
+            p_depth_stencil_state: &depth_stencil_state,
+            p_color_blend_state: &color_blend_state,
+            p_dynamic_state: &dynamic_state,
             layout: self
                 .layout
                 .expect("No layout specified for GraphicsPipeline")
@@ -1797,20 +1870,17 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             ..Default::default()
         };
         let create_infos = [graphics_pipeline_create_info];
-        // match unsafe {
-        //     device
-        //         .device
-        //         .create_graphics_pipelines(pipeline_cache.cache, &create_infos, None)
-        // } {
-        //     Ok(pipelines) => Ok(GraphicsPipeline {
-        //         pipeline: pipelines[0],
-        //     }),
-        //     Err((_, r)) => Err(r),
-        // }
-        Ok(GraphicsPipeline {
-            pipeline: ash::vk::Pipeline::null(),
-            device: Some(device.clone()),
-        })
+        match unsafe {
+            device
+                .device
+                .create_graphics_pipelines(pipeline_cache.cache, &create_infos, None)
+        } {
+            Ok(pipelines) => Ok(GraphicsPipeline {
+                pipeline: pipelines[0],
+                device: Some(device.clone()),
+            }),
+            Err((_, r)) => Err(r),
+        }
     }
 }
 
@@ -1888,9 +1958,9 @@ impl Scene {
 
     pub fn prepare(
         &mut self,
-        swapchain: &Swapchain,
+        _swapchain: &Swapchain,
         swapchain_render_pass: &SwapchainRenderPass,
-        command_list: &CommandList,
+        _command_list: &CommandList,
         pipeline_cache: &PipelineCache,
     ) {
         let device = self.device.as_ref().unwrap();
@@ -1954,7 +2024,12 @@ impl Scene {
             let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
             let color_shaders = [&color_vs, &color_fs];
 
-            self.color_pipeline_layout = Some(PipelineLayout::new(device, &[], &[]));
+            let color_pipeline_desc_set_layouts = [color_desc_set_layout];
+            self.color_pipeline_layout = Some(PipelineLayout::new(
+                device,
+                &color_pipeline_desc_set_layouts,
+                &[],
+            ));
 
             let vertex_bindings = [ash::vk::VertexInputBindingDescription {
                 binding: 0,
