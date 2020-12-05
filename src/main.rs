@@ -1476,6 +1476,31 @@ impl MemAllocator {
             _ => (),
         }
     }
+
+    pub fn update_host_visible(
+        &self,
+        allocation: &vk_mem::Allocation,
+        offset: usize,
+        len: usize,
+        data: &[(*const u8, usize, usize)],
+    ) {
+        // map_memory should mostly be no-op due to creating as MAPPED
+        match self.allocator.map_memory(allocation) {
+            Ok(p) => {
+                unsafe {
+                    for (src, copy_offset, copy_len) in data {
+                        p.add(offset + copy_offset)
+                            .copy_from_nonoverlapping(*src, *copy_len);
+                    }
+                };
+            }
+            Err(r) => panic!(r),
+        }
+        self.allocator.unmap_memory(allocation).unwrap();
+        self.allocator
+            .flush_allocation(allocation, offset, len)
+            .unwrap();
+    }
 }
 
 impl Drop for MemAllocator {
@@ -1909,12 +1934,13 @@ struct TriangleVertex {
 }
 
 const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
+    // Y up, front=CCW
     TriangleVertex {
-        pos: [-0.5, -0.5, 0.0],
+        pos: [0.0, 0.5, 0.0],
         color: [1.0, 0.0, 0.0],
     },
     TriangleVertex {
-        pos: [0.0, 0.5, 0.0],
+        pos: [-0.5, -0.5, 0.0],
         color: [0.0, 1.0, 0.0],
     },
     TriangleVertex {
@@ -1926,8 +1952,8 @@ const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
 pub struct Scene {
     green: f32,
     triangle_ready: bool,
-    triangle_vbuf: ash::vk::Buffer,
-    triangle_vbuf_alloc: vk_mem::Allocation,
+    triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
+    triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
     color_pipeline_layout: Option<PipelineLayout>,
     color_pipeline: Option<GraphicsPipeline>,
     descriptor_pool: Option<DescriptorPool>,
@@ -1939,11 +1965,12 @@ pub struct Scene {
 
 impl Scene {
     pub fn new(device: &Rc<Device>, allocator: &Rc<MemAllocator>) -> Self {
+        let null_buf_and_alloc = (ash::vk::Buffer::null(), vk_mem::Allocation::null());
         Scene {
             green: 0.0,
             triangle_ready: false,
-            triangle_vbuf: ash::vk::Buffer::null(),
-            triangle_vbuf_alloc: vk_mem::Allocation::null(),
+            triangle_vbuf: null_buf_and_alloc,
+            triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
             color_pipeline_layout: None,
             color_pipeline: None,
             descriptor_pool: None,
@@ -1961,7 +1988,10 @@ impl Scene {
         self.color_pipeline_layout = None;
         if self.allocator.is_some() {
             let allocator = self.allocator.as_ref().unwrap();
-            allocator.destroy_buffer(self.triangle_vbuf, &self.triangle_vbuf_alloc);
+            for (buf, alloc) in &self.triangle_ubufs {
+                allocator.destroy_buffer(*buf, alloc);
+            }
+            allocator.destroy_buffer(self.triangle_vbuf.0, &self.triangle_vbuf.1);
             self.allocator = None;
         }
         self.device = None;
@@ -1981,28 +2011,32 @@ impl Scene {
         let device = self.device.as_ref().unwrap();
         let allocator = self.allocator.as_ref().unwrap();
         if !self.triangle_ready {
-            let (buf, alloc) = allocator
+            self.triangle_vbuf = allocator
                 .create_host_visible_buffer(256, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
                 .unwrap();
             let copy_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
-            match allocator.allocator.map_memory(&alloc) {
-                Ok(p) => {
-                    unsafe {
-                        p.copy_from_nonoverlapping(
-                            TRIANGLE_VERTICES.as_ptr() as *const u8,
-                            copy_len,
-                        )
-                    };
-                }
-                Err(r) => panic!(r),
+            let copy_data = [(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, copy_len)];
+            allocator.update_host_visible(&self.triangle_vbuf.1, 0, copy_len, &copy_data);
+
+            for i in 0..FRAMES_IN_FLIGHT {
+                self.triangle_ubufs[i as usize] = allocator
+                    .create_host_visible_buffer(68, ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
+                    .unwrap();
+                let mvp: [f32; 16] = [
+                    1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ];
+                let opacity: [f32; 1] = [1.0];
+                let copy_data = [
+                    (mvp.as_ptr() as *const u8, 0, 64),
+                    (opacity.as_ptr() as *const u8, 64, 4),
+                ];
+                allocator.update_host_visible(
+                    &self.triangle_ubufs[i as usize].1,
+                    0,
+                    68,
+                    &copy_data,
+                );
             }
-            allocator.allocator.unmap_memory(&alloc).unwrap();
-            allocator
-                .allocator
-                .flush_allocation(&alloc, 0, copy_len)
-                .unwrap();
-            self.triangle_vbuf = buf;
-            self.triangle_vbuf_alloc = alloc;
 
             let desc_set_sizes = [ash::vk::DescriptorPoolSize {
                 ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
@@ -2034,6 +2068,27 @@ impl Scene {
             self.triangle_desc_sets = descriptor_pool
                 .allocate(&color_desc_set_alloc_layouts)
                 .expect("Failed to allocate descriptor sets for triangle");
+
+            let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
+                smallvec::smallvec![];
+            for i in 0..FRAMES_IN_FLIGHT {
+                let buffer_info = [ash::vk::DescriptorBufferInfo {
+                    buffer: self.triangle_ubufs[i as usize].0,
+                    offset: 0,
+                    range: ash::vk::WHOLE_SIZE,
+                }];
+                desc_writes.push(ash::vk::WriteDescriptorSet {
+                    dst_set: self.triangle_desc_sets[i as usize],
+                    dst_binding: 0,
+                    descriptor_count: 1,
+                    descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                    p_buffer_info: buffer_info.as_ptr(),
+                    ..Default::default()
+                });
+            }
+            unsafe {
+                device.device.update_descriptor_sets(&desc_writes, &[]);
+            }
 
             let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
             let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
@@ -2114,7 +2169,7 @@ impl Scene {
             extent: swapchain.pixel_size,
         }];
         let desc_sets = [self.triangle_desc_sets[current_frame_slot as usize]];
-        let vertex_buffers = [self.triangle_vbuf];
+        let vertex_buffers = [self.triangle_vbuf.0];
         let vertex_buffer_offsets = [0];
 
         unsafe {
@@ -2178,6 +2233,7 @@ impl App {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         let window = winit::window::WindowBuilder::new()
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+            .with_title("Rust Vulkan Test")
             .build(event_loop)
             .expect("Failed to create window");
         let instance = Rc::new(Instance::new(&window, ENABLE_VALIDATION));
