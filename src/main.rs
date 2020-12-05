@@ -1166,6 +1166,7 @@ impl SwapchainFrameState {
 
         command_list.end(device, self.current_frame_slot);
 
+        let cb_ref = self.current_frame_command_buffer(command_list);
         let s = &mut self.sync_objects[self.current_frame_slot as usize];
         let wait_dst_stage_mask = ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
         let submit_info = ash::vk::SubmitInfo {
@@ -1173,7 +1174,7 @@ impl SwapchainFrameState {
             p_wait_semaphores: &s.image_sem,
             p_wait_dst_stage_mask: &wait_dst_stage_mask,
             command_buffer_count: 1,
-            p_command_buffers: &command_list.command_buffers[self.current_frame_slot as usize],
+            p_command_buffers: cb_ref,
             signal_semaphore_count: 1,
             p_signal_semaphores: &s.present_sem,
             ..Default::default()
@@ -1216,6 +1217,13 @@ impl SwapchainFrameState {
         self.frame_count += 1;
     }
 
+    pub fn current_frame_command_buffer<'a>(
+        &self,
+        command_list: &'a CommandList,
+    ) -> &'a ash::vk::CommandBuffer {
+        &command_list.command_buffers[self.current_frame_slot as usize]
+    }
+
     fn transition(
         &self,
         device: &Device,
@@ -1244,7 +1252,7 @@ impl SwapchainFrameState {
         }];
         unsafe {
             device.device.cmd_pipeline_barrier(
-                command_list.command_buffers[self.current_frame_slot as usize],
+                *self.current_frame_command_buffer(command_list),
                 src_stage_mask,
                 dst_stage_mask,
                 ash::vk::DependencyFlags::empty(),
@@ -1264,7 +1272,7 @@ impl SwapchainFrameState {
         command_list: &CommandList,
         clear_color: [f32; 4],
     ) {
-        let cb = command_list.command_buffers[self.current_frame_slot as usize];
+        let cb = *self.current_frame_command_buffer(command_list);
         let clear_values = [ash::vk::ClearValue {
             color: ash::vk::ClearColorValue {
                 float32: clear_color,
@@ -1289,8 +1297,11 @@ impl SwapchainFrameState {
     }
 
     pub fn end_render_pass(&mut self, device: &Device, command_list: &CommandList) {
-        let cb = command_list.command_buffers[self.current_frame_slot as usize];
-        unsafe { device.device.cmd_end_render_pass(cb) };
+        unsafe {
+            device
+                .device
+                .cmd_end_render_pass(*self.current_frame_command_buffer(command_list))
+        };
         self.render_pass_count += 1;
     }
 }
@@ -1833,6 +1844,10 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             ..Default::default()
         };
         let color_blend_attachment_list = [ash::vk::PipelineColorBlendAttachmentState {
+            color_write_mask: ash::vk::ColorComponentFlags::R
+                | ash::vk::ColorComponentFlags::G
+                | ash::vk::ColorComponentFlags::B
+                | ash::vk::ColorComponentFlags::A,
             ..Default::default()
         }];
         let color_blend_state = ash::vk::PipelineColorBlendStateCreateInfo {
@@ -2075,6 +2090,8 @@ impl Scene {
         command_list: &CommandList,
     ) {
         let device = self.device.as_ref().unwrap();
+        let cb = *swapchain_frame_state.current_frame_command_buffer(command_list);
+        let current_frame_slot = swapchain_frame_state.current_frame_slot;
         swapchain_frame_state.begin_render_pass(
             device,
             swapchain,
@@ -2083,6 +2100,47 @@ impl Scene {
             command_list,
             [0.0, self.green, 0.0, 1.0],
         );
+
+        let viewport_list = [ash::vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain.pixel_size.width as f32,
+            height: swapchain.pixel_size.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissor_list = [ash::vk::Rect2D {
+            offset: ash::vk::Offset2D { x: 0, y: 0 },
+            extent: swapchain.pixel_size,
+        }];
+        let desc_sets = [self.triangle_desc_sets[current_frame_slot as usize]];
+        let vertex_buffers = [self.triangle_vbuf];
+        let vertex_buffer_offsets = [0];
+
+        unsafe {
+            device.device.cmd_bind_pipeline(
+                cb,
+                ash::vk::PipelineBindPoint::GRAPHICS,
+                self.color_pipeline.as_ref().unwrap().pipeline,
+            );
+            device.device.cmd_set_viewport(cb, 0, &viewport_list);
+            device.device.cmd_set_scissor(cb, 0, &scissor_list);
+            device.device.cmd_bind_descriptor_sets(
+                cb,
+                ash::vk::PipelineBindPoint::GRAPHICS,
+                self.color_pipeline_layout.as_ref().unwrap().layout,
+                0,
+                &desc_sets,
+                &[],
+            );
+            device
+                .device
+                .cmd_bind_vertex_buffers(cb, 0, &vertex_buffers, &vertex_buffer_offsets);
+            device
+                .device
+                .cmd_draw(cb, TRIANGLE_VERTICES.len() as u32, 1, 0, 0);
+        }
+
         swapchain_frame_state.end_render_pass(device, command_list);
         self.green += 0.01;
         if self.green > 1.0 {
