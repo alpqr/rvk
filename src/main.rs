@@ -1,6 +1,7 @@
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use bitflags::bitflags;
 use const_cstr::const_cstr;
+use nalgebra_glm as glm;
 use std::rc::Rc;
 
 const ENABLE_VALIDATION: bool = true;
@@ -337,11 +338,10 @@ pub struct Device {
 
 impl Device {
     pub fn new(instance: &Instance, physical_device: &PhysicalDevice) -> Self {
-        let queue_priorities = [1.0f32];
         let queue_create_info = ash::vk::DeviceQueueCreateInfo {
             queue_family_index: physical_device.gfx_compute_present_queue_family_index,
-            p_queue_priorities: queue_priorities.as_ptr(),
-            queue_count: queue_priorities.len() as u32,
+            p_queue_priorities: [1.0f32].as_ptr(),
+            queue_count: 1,
             ..Default::default()
         };
 
@@ -435,22 +435,20 @@ impl Device {
     }
 
     pub fn wait_fence(&self, fence: &ash::vk::Fence) {
-        let fence_list = [*fence];
         unsafe {
             self.device
-                .wait_for_fences(&fence_list, true, u64::max_value())
+                .wait_for_fences(&[*fence], true, u64::max_value())
                 .expect("Fence wait failed")
         };
     }
 
     pub fn wait_reset_fence(&self, fence: &ash::vk::Fence) {
-        let fence_list = [*fence];
         unsafe {
             self.device
-                .wait_for_fences(&fence_list, true, u64::max_value())
+                .wait_for_fences(&[*fence], true, u64::max_value())
                 .expect("Fence wait failed");
             self.device
-                .reset_fences(&fence_list)
+                .reset_fences(&[*fence])
                 .expect("Fence reset failed");
         }
     }
@@ -783,15 +781,13 @@ impl SwapchainRenderPass {
             dst_access_mask: ash::vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
             ..Default::default()
         };
-        let attachments = [color_attachment];
-        let dependencies = [subpass_dep];
         let renderpass_create_info = ash::vk::RenderPassCreateInfo {
-            attachment_count: attachments.len() as u32,
-            p_attachments: attachments.as_ptr(),
+            attachment_count: 1,
+            p_attachments: [color_attachment].as_ptr(),
             subpass_count: 1,
             p_subpasses: &subpass_desc,
             dependency_count: 1,
-            p_dependencies: dependencies.as_ptr(),
+            p_dependencies: [subpass_dep].as_ptr(),
             ..Default::default()
         };
         let render_pass = unsafe {
@@ -841,11 +837,10 @@ impl SwapchainFramebuffers {
     ) -> Self {
         let mut framebuffers: smallvec::SmallVec<[ash::vk::Framebuffer; 8]> = smallvec::smallvec![];
         for &view in images.views.iter() {
-            let attachments = [view];
             let framebuffer_create_info = ash::vk::FramebufferCreateInfo {
                 render_pass: render_pass.render_pass,
                 attachment_count: 1,
-                p_attachments: attachments.as_ptr(),
+                p_attachments: [view].as_ptr(),
                 width: swapchain.pixel_size.width,
                 height: swapchain.pixel_size.height,
                 layers: 1,
@@ -1168,22 +1163,20 @@ impl SwapchainFrameState {
 
         let cb_ref = self.current_frame_command_buffer(command_list);
         let s = &mut self.sync_objects[self.current_frame_slot as usize];
-        let wait_dst_stage_mask = ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
         let submit_info = ash::vk::SubmitInfo {
             wait_semaphore_count: if s.image_sem_waitable { 1 } else { 0 },
             p_wait_semaphores: &s.image_sem,
-            p_wait_dst_stage_mask: &wait_dst_stage_mask,
+            p_wait_dst_stage_mask: [ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT].as_ptr(),
             command_buffer_count: 1,
             p_command_buffers: cb_ref,
             signal_semaphore_count: 1,
             p_signal_semaphores: &s.present_sem,
             ..Default::default()
         };
-        let submits = [submit_info];
         unsafe {
             device
                 .device
-                .queue_submit(device.queue, &submits, s.cmd_fence)
+                .queue_submit(device.queue, &[submit_info], s.cmd_fence)
                 .expect("Failed to submit to queue")
         };
         s.cmd_fence_waitable = true;
@@ -1909,11 +1902,12 @@ impl<'a> GraphicsPipelineBuilder<'a> {
                 .expect("No renderpass specified for GraphicsPipeline"),
             ..Default::default()
         };
-        let create_infos = [graphics_pipeline_create_info];
         match unsafe {
-            device
-                .device
-                .create_graphics_pipelines(pipeline_cache.cache, &create_infos, None)
+            device.device.create_graphics_pipelines(
+                pipeline_cache.cache,
+                &[graphics_pipeline_create_info],
+                None,
+            )
         } {
             Ok(pipelines) => Ok(GraphicsPipeline {
                 pipeline: pipelines[0],
@@ -1950,7 +1944,6 @@ const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
 ];
 
 pub struct Scene {
-    green: f32,
     triangle_ready: bool,
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
     triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
@@ -1959,6 +1952,10 @@ pub struct Scene {
     descriptor_pool: Option<DescriptorPool>,
     color_desc_set_layout: Option<DescriptorSetLayout>,
     triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
+    triangle_view: glm::Mat4,
+    triangle_rotation: f32,
+    output_pixel_size: ash::vk::Extent2D,
+    projection: glm::Mat4,
     device: Option<Rc<Device>>,
     allocator: Option<Rc<MemAllocator>>,
 }
@@ -1967,7 +1964,6 @@ impl Scene {
     pub fn new(device: &Rc<Device>, allocator: &Rc<MemAllocator>) -> Self {
         let null_buf_and_alloc = (ash::vk::Buffer::null(), vk_mem::Allocation::null());
         Scene {
-            green: 0.0,
             triangle_ready: false,
             triangle_vbuf: null_buf_and_alloc,
             triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
@@ -1976,6 +1972,13 @@ impl Scene {
             descriptor_pool: None,
             color_desc_set_layout: None,
             triangle_desc_sets: vec![],
+            triangle_view: glm::identity(),
+            triangle_rotation: 0.0,
+            output_pixel_size: ash::vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
+            projection: glm::identity(),
             device: Some(device.clone()),
             allocator: Some(allocator.clone()),
         }
@@ -1997,92 +2000,103 @@ impl Scene {
         self.device = None;
     }
 
-    pub fn sync(&self) -> bool {
+    pub fn sync(&mut self) -> bool {
+        self.triangle_rotation += 1.0;
         true
     }
 
     pub fn prepare(
         &mut self,
-        _swapchain: &Swapchain,
+        swapchain: &Swapchain,
         swapchain_render_pass: &SwapchainRenderPass,
+        swapchain_frame_state: &SwapchainFrameState,
         _command_list: &CommandList,
         pipeline_cache: &PipelineCache,
     ) {
         let device = self.device.as_ref().unwrap();
         let allocator = self.allocator.as_ref().unwrap();
+        let current_frame_slot = swapchain_frame_state.current_frame_slot;
+
+        if self.output_pixel_size != swapchain.pixel_size {
+            self.output_pixel_size = swapchain.pixel_size;
+            self.projection = glm::perspective_fov_zo(
+                45.0f32.to_radians(),
+                self.output_pixel_size.width as f32,
+                self.output_pixel_size.height as f32,
+                0.01f32,
+                1000.0f32,
+            );
+            self.projection[5] *= -1.0f32; // vertex data is Y up
+        }
+
         if !self.triangle_ready {
             self.triangle_vbuf = allocator
                 .create_host_visible_buffer(256, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
                 .unwrap();
             let copy_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
-            let copy_data = [(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, copy_len)];
-            allocator.update_host_visible(&self.triangle_vbuf.1, 0, copy_len, &copy_data);
+            allocator.update_host_visible(
+                &self.triangle_vbuf.1,
+                0,
+                copy_len,
+                &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, copy_len)],
+            );
+
+            self.triangle_view =
+                glm::translate(&glm::identity(), &glm::vec3(0.0f32, 0.0f32, -4.0f32));
 
             for i in 0..FRAMES_IN_FLIGHT {
                 self.triangle_ubufs[i as usize] = allocator
                     .create_host_visible_buffer(68, ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
                     .unwrap();
-                let mvp: [f32; 16] = [
-                    1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ];
-                let opacity: [f32; 1] = [1.0];
-                let copy_data = [
-                    (mvp.as_ptr() as *const u8, 0, 64),
-                    (opacity.as_ptr() as *const u8, 64, 4),
-                ];
                 allocator.update_host_visible(
                     &self.triangle_ubufs[i as usize].1,
-                    0,
-                    68,
-                    &copy_data,
+                    64,
+                    4,
+                    &[([1.0f32].as_ptr() as *const u8, 64, 4)],
                 );
             }
 
-            let desc_set_sizes = [ash::vk::DescriptorPoolSize {
-                ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: FRAMES_IN_FLIGHT,
-            }];
             self.descriptor_pool = Some(DescriptorPool::new(
                 device,
                 FRAMES_IN_FLIGHT,
-                &desc_set_sizes,
+                &[ash::vk::DescriptorPoolSize {
+                    ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: FRAMES_IN_FLIGHT,
+                }],
             ));
             let descriptor_pool = self.descriptor_pool.as_ref().unwrap();
 
-            let color_desc_set_layout_bindings = [ash::vk::DescriptorSetLayoutBinding {
-                binding: 0,
-                descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-                stage_flags: ash::vk::ShaderStageFlags::VERTEX
-                    | ash::vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            }];
             self.color_desc_set_layout = Some(DescriptorSetLayout::new(
                 device,
-                &color_desc_set_layout_bindings,
+                &[ash::vk::DescriptorSetLayoutBinding {
+                    binding: 0,
+                    descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                    descriptor_count: 1,
+                    stage_flags: ash::vk::ShaderStageFlags::VERTEX
+                        | ash::vk::ShaderStageFlags::FRAGMENT,
+                    ..Default::default()
+                }],
             ));
             let color_desc_set_layout = self.color_desc_set_layout.as_ref().unwrap();
 
-            let color_desc_set_alloc_layouts: [&DescriptorSetLayout; FRAMES_IN_FLIGHT as usize] =
-                [color_desc_set_layout; FRAMES_IN_FLIGHT as usize];
             self.triangle_desc_sets = descriptor_pool
-                .allocate(&color_desc_set_alloc_layouts)
+                .allocate(&[color_desc_set_layout; FRAMES_IN_FLIGHT as usize])
                 .expect("Failed to allocate descriptor sets for triangle");
 
             let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
                 smallvec::smallvec![];
             for i in 0..FRAMES_IN_FLIGHT {
-                let buffer_info = [ash::vk::DescriptorBufferInfo {
-                    buffer: self.triangle_ubufs[i as usize].0,
-                    offset: 0,
-                    range: ash::vk::WHOLE_SIZE,
-                }];
                 desc_writes.push(ash::vk::WriteDescriptorSet {
                     dst_set: self.triangle_desc_sets[i as usize],
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: buffer_info.as_ptr(),
+                    p_buffer_info: [ash::vk::DescriptorBufferInfo {
+                        buffer: self.triangle_ubufs[i as usize].0,
+                        offset: 0,
+                        range: ash::vk::WHOLE_SIZE,
+                    }]
+                    .as_ptr(),
                     ..Default::default()
                 });
             }
@@ -2092,14 +2106,9 @@ impl Scene {
 
             let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
             let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
-            let color_shaders = [&color_vs, &color_fs];
 
-            let color_pipeline_desc_set_layouts = [color_desc_set_layout];
-            self.color_pipeline_layout = Some(PipelineLayout::new(
-                device,
-                &color_pipeline_desc_set_layouts,
-                &[],
-            ));
+            self.color_pipeline_layout =
+                Some(PipelineLayout::new(device, &[color_desc_set_layout], &[]));
 
             let vertex_bindings = [ash::vk::VertexInputBindingDescription {
                 binding: 0,
@@ -2124,16 +2133,30 @@ impl Scene {
             let mut pipeline_builder = GraphicsPipelineBuilder::new();
             self.color_pipeline = Some(
                 pipeline_builder
-                    .with_shader_stages(&color_shaders)
+                    .with_shader_stages(&[&color_vs, &color_fs])
                     .with_layout(&self.color_pipeline_layout.as_ref().unwrap())
                     .with_render_pass(&swapchain_render_pass.render_pass)
                     .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
+                    .with_cull_mode(ash::vk::CullModeFlags::NONE)
                     .build(device, pipeline_cache)
                     .expect("Failed to build simple graphics pipeline"),
             );
 
             self.triangle_ready = true;
         }
+
+        let triangle_model = glm::rotate(
+            &glm::identity(),
+            self.triangle_rotation.to_radians(),
+            &glm::vec3(0.0f32, 1.0f32, 0.0f32),
+        );
+        let mvp = self.projection * self.triangle_view * triangle_model;
+        allocator.update_host_visible(
+            &self.triangle_ubufs[current_frame_slot as usize].1,
+            0,
+            64,
+            &[(mvp.as_ptr() as *const u8, 0, 64)],
+        );
     }
 
     pub fn render(
@@ -2153,24 +2176,8 @@ impl Scene {
             swapchain_framebuffers,
             swapchain_render_pass,
             command_list,
-            [0.0, self.green, 0.0, 1.0],
+            [0.0, 0.5, 0.0, 1.0],
         );
-
-        let viewport_list = [ash::vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain.pixel_size.width as f32,
-            height: swapchain.pixel_size.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissor_list = [ash::vk::Rect2D {
-            offset: ash::vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain.pixel_size,
-        }];
-        let desc_sets = [self.triangle_desc_sets[current_frame_slot as usize]];
-        let vertex_buffers = [self.triangle_vbuf.0];
-        let vertex_buffer_offsets = [0];
 
         unsafe {
             device.device.cmd_bind_pipeline(
@@ -2178,29 +2185,43 @@ impl Scene {
                 ash::vk::PipelineBindPoint::GRAPHICS,
                 self.color_pipeline.as_ref().unwrap().pipeline,
             );
-            device.device.cmd_set_viewport(cb, 0, &viewport_list);
-            device.device.cmd_set_scissor(cb, 0, &scissor_list);
+            device.device.cmd_set_viewport(
+                cb,
+                0,
+                &[ash::vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.output_pixel_size.width as f32,
+                    height: self.output_pixel_size.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            device.device.cmd_set_scissor(
+                cb,
+                0,
+                &[ash::vk::Rect2D {
+                    offset: ash::vk::Offset2D { x: 0, y: 0 },
+                    extent: self.output_pixel_size,
+                }],
+            );
             device.device.cmd_bind_descriptor_sets(
                 cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
                 self.color_pipeline_layout.as_ref().unwrap().layout,
                 0,
-                &desc_sets,
+                &[self.triangle_desc_sets[current_frame_slot as usize]],
                 &[],
             );
             device
                 .device
-                .cmd_bind_vertex_buffers(cb, 0, &vertex_buffers, &vertex_buffer_offsets);
+                .cmd_bind_vertex_buffers(cb, 0, &[self.triangle_vbuf.0], &[0]);
             device
                 .device
                 .cmd_draw(cb, TRIANGLE_VERTICES.len() as u32, 1, 0, 0);
         }
 
         swapchain_frame_state.end_render_pass(device, command_list);
-        self.green += 0.01;
-        if self.green > 1.0 {
-            self.green = 0.0;
-        }
     }
 }
 
@@ -2355,6 +2376,7 @@ impl App {
                                 self.scene.prepare(
                                     &self.swapchain,
                                     &self.swapchain_render_pass,
+                                    &self.swapchain_frame_state,
                                     &self.command_list,
                                     &self.pipeline_cache,
                                 );
