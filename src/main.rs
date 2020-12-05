@@ -338,10 +338,11 @@ pub struct Device {
 
 impl Device {
     pub fn new(instance: &Instance, physical_device: &PhysicalDevice) -> Self {
+        let queue_priorities = [1.0f32];
         let queue_create_info = ash::vk::DeviceQueueCreateInfo {
             queue_family_index: physical_device.gfx_compute_present_queue_family_index,
-            p_queue_priorities: [1.0f32].as_ptr(),
-            queue_count: 1,
+            p_queue_priorities: queue_priorities.as_ptr(),
+            queue_count: queue_priorities.len() as u32,
             ..Default::default()
         };
 
@@ -783,11 +784,11 @@ impl SwapchainRenderPass {
         };
         let renderpass_create_info = ash::vk::RenderPassCreateInfo {
             attachment_count: 1,
-            p_attachments: [color_attachment].as_ptr(),
+            p_attachments: &color_attachment,
             subpass_count: 1,
             p_subpasses: &subpass_desc,
             dependency_count: 1,
-            p_dependencies: [subpass_dep].as_ptr(),
+            p_dependencies: &subpass_dep,
             ..Default::default()
         };
         let render_pass = unsafe {
@@ -840,7 +841,7 @@ impl SwapchainFramebuffers {
             let framebuffer_create_info = ash::vk::FramebufferCreateInfo {
                 render_pass: render_pass.render_pass,
                 attachment_count: 1,
-                p_attachments: [view].as_ptr(),
+                p_attachments: &view,
                 width: swapchain.pixel_size.width,
                 height: swapchain.pixel_size.height,
                 layers: 1,
@@ -1163,10 +1164,11 @@ impl SwapchainFrameState {
 
         let cb_ref = self.current_frame_command_buffer(command_list);
         let s = &mut self.sync_objects[self.current_frame_slot as usize];
+        let wait_dst_stage_mask = ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
         let submit_info = ash::vk::SubmitInfo {
             wait_semaphore_count: if s.image_sem_waitable { 1 } else { 0 },
             p_wait_semaphores: &s.image_sem,
-            p_wait_dst_stage_mask: [ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT].as_ptr(),
+            p_wait_dst_stage_mask: &wait_dst_stage_mask,
             command_buffer_count: 1,
             p_command_buffers: cb_ref,
             signal_semaphore_count: 1,
@@ -2047,11 +2049,12 @@ impl Scene {
                 self.triangle_ubufs[i as usize] = allocator
                     .create_host_visible_buffer(68, ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
                     .unwrap();
+                let opacity = [1.0f32];
                 allocator.update_host_visible(
                     &self.triangle_ubufs[i as usize].1,
                     64,
                     4,
-                    &[([1.0f32].as_ptr() as *const u8, 64, 4)],
+                    &[(opacity.as_ptr() as *const u8, 64, 4)],
                 );
             }
 
@@ -2090,12 +2093,11 @@ impl Scene {
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: [ash::vk::DescriptorBufferInfo {
+                    p_buffer_info: &ash::vk::DescriptorBufferInfo {
                         buffer: self.triangle_ubufs[i as usize].0,
                         offset: 0,
                         range: ash::vk::WHOLE_SIZE,
-                    }]
-                    .as_ptr(),
+                    },
                     ..Default::default()
                 });
             }
