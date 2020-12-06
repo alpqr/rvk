@@ -1055,12 +1055,18 @@ fn make_swapchain_frame_sync_objects(
     sync_objects
 }
 
+bitflags! {
+    pub struct EndFrameFlags: u32 {
+        const NO_RENDER_PASS = 0x01;
+        const SKIP_PRESENT = 0x02;
+    }
+}
+
 pub struct SwapchainFrameState {
     pub sync_objects: smallvec::SmallVec<[SwapchainFrameSyncObjects; FRAMES_IN_FLIGHT as usize]>,
     current_frame_slot: u32,
     current_image_index: u32,
     frame_count: u64,
-    render_pass_count: u32,
     device: Option<Rc<Device>>,
 }
 
@@ -1071,7 +1077,6 @@ impl SwapchainFrameState {
             current_frame_slot: 0,
             current_image_index: 0,
             frame_count: 0,
-            render_pass_count: 0,
             device: Some(device.clone()),
         }
     }
@@ -1134,8 +1139,6 @@ impl SwapchainFrameState {
         command_pool.reset(device, self.current_frame_slot);
         command_list.begin(device, self.current_frame_slot);
 
-        self.render_pass_count = 0;
-
         Ok(self.current_frame_slot)
     }
 
@@ -1145,8 +1148,9 @@ impl SwapchainFrameState {
         swapchain: &Swapchain,
         swapchain_images: &SwapchainImages,
         command_list: &CommandList,
+        flags: EndFrameFlags,
     ) {
-        if self.render_pass_count == 0 {
+        if flags.contains(EndFrameFlags::NO_RENDER_PASS) {
             self.transition(
                 device,
                 swapchain_images,
@@ -1162,6 +1166,7 @@ impl SwapchainFrameState {
 
         command_list.end(device, self.current_frame_slot);
 
+        let needs_present = !flags.contains(EndFrameFlags::SKIP_PRESENT);
         let cb_ref = self.current_frame_command_buffer(command_list);
         let s = &mut self.sync_objects[self.current_frame_slot as usize];
         let wait_dst_stage_mask = ash::vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
@@ -1171,8 +1176,12 @@ impl SwapchainFrameState {
             p_wait_dst_stage_mask: &wait_dst_stage_mask,
             command_buffer_count: 1,
             p_command_buffers: cb_ref,
-            signal_semaphore_count: 1,
-            p_signal_semaphores: &s.present_sem,
+            signal_semaphore_count: if needs_present { 1 } else { 0 },
+            p_signal_semaphores: if needs_present {
+                &s.present_sem
+            } else {
+                std::ptr::null()
+            },
             ..Default::default()
         };
         unsafe {
@@ -1184,32 +1193,34 @@ impl SwapchainFrameState {
         s.cmd_fence_waitable = true;
         s.image_sem_waitable = false;
 
-        let present_info = ash::vk::PresentInfoKHR {
-            wait_semaphore_count: 1,
-            p_wait_semaphores: &s.present_sem,
-            swapchain_count: 1,
-            p_swapchains: &swapchain.swapchain,
-            p_image_indices: &self.current_image_index,
-            p_results: std::ptr::null_mut(),
-            ..Default::default()
-        };
-        let present_result = unsafe {
-            device
-                .ext_swapchain
-                .queue_present(device.queue, &present_info)
-        };
-        match present_result {
-            Err(r) => {
-                if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
-                    panic!(r)
+        if needs_present {
+            let present_info = ash::vk::PresentInfoKHR {
+                wait_semaphore_count: 1,
+                p_wait_semaphores: &s.present_sem,
+                swapchain_count: 1,
+                p_swapchains: &swapchain.swapchain,
+                p_image_indices: &self.current_image_index,
+                p_results: std::ptr::null_mut(),
+                ..Default::default()
+            };
+            let present_result = unsafe {
+                device
+                    .ext_swapchain
+                    .queue_present(device.queue, &present_info)
+            };
+            match present_result {
+                Err(r) => {
+                    if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
+                        panic!(r)
+                    }
                 }
+                _ => (),
             }
-            _ => (),
+            s.image_acquired = false;
+            self.current_frame_slot = (self.current_frame_slot + 1) % FRAMES_IN_FLIGHT;
         }
-        s.image_acquired = false;
 
-        self.current_frame_slot = (self.current_frame_slot + 1) % FRAMES_IN_FLIGHT;
-        self.frame_count += 1;
+        self.frame_count = self.frame_count.wrapping_add(1);
     }
 
     pub fn current_frame_command_buffer<'a>(
@@ -1256,48 +1267,6 @@ impl SwapchainFrameState {
                 &image_barriers,
             );
         }
-    }
-
-    pub fn begin_render_pass(
-        &self,
-        device: &Device,
-        swapchain: &Swapchain,
-        framebuffers: &SwapchainFramebuffers,
-        render_pass: &SwapchainRenderPass,
-        command_list: &CommandList,
-        clear_color: [f32; 4],
-    ) {
-        let cb = *self.current_frame_command_buffer(command_list);
-        let clear_values = [ash::vk::ClearValue {
-            color: ash::vk::ClearColorValue {
-                float32: clear_color,
-            },
-        }];
-        let begin_info = ash::vk::RenderPassBeginInfo {
-            render_pass: render_pass.render_pass,
-            framebuffer: framebuffers.framebuffers[self.current_image_index as usize],
-            render_area: ash::vk::Rect2D {
-                offset: ash::vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain.pixel_size,
-            },
-            clear_value_count: clear_values.len() as u32,
-            p_clear_values: clear_values.as_ptr(),
-            ..Default::default()
-        };
-        unsafe {
-            device
-                .device
-                .cmd_begin_render_pass(cb, &begin_info, ash::vk::SubpassContents::INLINE)
-        };
-    }
-
-    pub fn end_render_pass(&mut self, device: &Device, command_list: &CommandList) {
-        unsafe {
-            device
-                .device
-                .cmd_end_render_pass(*self.current_frame_command_buffer(command_list))
-        };
-        self.render_pass_count += 1;
     }
 }
 
@@ -2045,9 +2014,13 @@ impl Scene {
 
             self.triangle_view = glm::translate(&glm::identity(), &glm::vec3(0.0, 0.0, -4.0));
 
+            const COLOR_UBUF_SIZE: usize = 68;
             for i in 0..FRAMES_IN_FLIGHT {
                 self.triangle_ubufs[i as usize] = allocator
-                    .create_host_visible_buffer(68, ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
+                    .create_host_visible_buffer(
+                        COLOR_UBUF_SIZE,
+                        ash::vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    )
                     .unwrap();
                 let opacity = [1.0f32];
                 allocator.update_host_visible(
@@ -2085,6 +2058,15 @@ impl Scene {
                 .allocate(&[color_desc_set_layout; FRAMES_IN_FLIGHT as usize])
                 .expect("Failed to allocate descriptor sets for triangle");
 
+            let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
+                smallvec::smallvec![];
+            for i in 0..FRAMES_IN_FLIGHT {
+                desc_buffer_infos.push(ash::vk::DescriptorBufferInfo {
+                    buffer: self.triangle_ubufs[i as usize].0,
+                    offset: 0,
+                    range: COLOR_UBUF_SIZE as u64,
+                });
+            }
             let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
                 smallvec::smallvec![];
             for i in 0..FRAMES_IN_FLIGHT {
@@ -2093,11 +2075,7 @@ impl Scene {
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: &ash::vk::DescriptorBufferInfo {
-                        buffer: self.triangle_ubufs[i as usize].0,
-                        offset: 0,
-                        range: ash::vk::WHOLE_SIZE,
-                    },
+                    p_buffer_info: &desc_buffer_infos[i as usize],
                     ..Default::default()
                 });
             }
@@ -2169,25 +2147,40 @@ impl Scene {
         command_list: &CommandList,
     ) {
         let device = self.device.as_ref().unwrap();
-        let cb = *swapchain_frame_state.current_frame_command_buffer(command_list);
+        let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
         let current_frame_slot = swapchain_frame_state.current_frame_slot;
-        swapchain_frame_state.begin_render_pass(
-            device,
-            swapchain,
-            swapchain_framebuffers,
-            swapchain_render_pass,
-            command_list,
-            [0.0, 0.5, 0.0, 1.0],
-        );
+        let current_image_index = swapchain_frame_state.current_image_index;
+
+        let clear_values = [ash::vk::ClearValue {
+            color: ash::vk::ClearColorValue {
+                float32: [0.0, 0.5, 0.0, 1.0],
+            },
+        }];
+        let pass_begin_info = ash::vk::RenderPassBeginInfo {
+            render_pass: swapchain_render_pass.render_pass,
+            framebuffer: swapchain_framebuffers.framebuffers[current_image_index as usize],
+            render_area: ash::vk::Rect2D {
+                offset: ash::vk::Offset2D { x: 0, y: 0 },
+                extent: swapchain.pixel_size,
+            },
+            clear_value_count: clear_values.len() as u32,
+            p_clear_values: clear_values.as_ptr(),
+            ..Default::default()
+        };
 
         unsafe {
+            device.device.cmd_begin_render_pass(
+                *cb,
+                &pass_begin_info,
+                ash::vk::SubpassContents::INLINE,
+            );
             device.device.cmd_bind_pipeline(
-                cb,
+                *cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
                 self.color_pipeline.as_ref().unwrap().pipeline,
             );
             device.device.cmd_set_viewport(
-                cb,
+                *cb,
                 0,
                 &[ash::vk::Viewport {
                     x: 0.0,
@@ -2199,7 +2192,7 @@ impl Scene {
                 }],
             );
             device.device.cmd_set_scissor(
-                cb,
+                *cb,
                 0,
                 &[ash::vk::Rect2D {
                     offset: ash::vk::Offset2D { x: 0, y: 0 },
@@ -2207,7 +2200,7 @@ impl Scene {
                 }],
             );
             device.device.cmd_bind_descriptor_sets(
-                cb,
+                *cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
                 self.color_pipeline_layout.as_ref().unwrap().layout,
                 0,
@@ -2216,13 +2209,12 @@ impl Scene {
             );
             device
                 .device
-                .cmd_bind_vertex_buffers(cb, 0, &[self.triangle_vbuf.0], &[0]);
+                .cmd_bind_vertex_buffers(*cb, 0, &[self.triangle_vbuf.0], &[0]);
             device
                 .device
-                .cmd_draw(cb, TRIANGLE_VERTICES.len() as u32, 1, 0, 0);
+                .cmd_draw(*cb, TRIANGLE_VERTICES.len() as u32, 1, 0, 0);
+            device.device.cmd_end_render_pass(*cb);
         }
-
-        swapchain_frame_state.end_render_pass(device, command_list);
     }
 }
 
@@ -2393,6 +2385,7 @@ impl App {
                                     &self.swapchain,
                                     &self.swapchain_images,
                                     &self.command_list,
+                                    EndFrameFlags::empty(),
                                 );
                             }
                             Err(r) => {
