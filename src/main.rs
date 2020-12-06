@@ -212,6 +212,10 @@ impl Drop for WindowSurface {
     }
 }
 
+fn aligned(v: u64, byte_alignment: u64) -> u64 {
+    (v + byte_alignment - 1) & !(byte_alignment - 1)
+}
+
 pub struct PhysicalDevice {
     pub physical_device: ash::vk::PhysicalDevice,
     pub properties: ash::vk::PhysicalDeviceProperties,
@@ -219,6 +223,33 @@ pub struct PhysicalDevice {
     pub features: ash::vk::PhysicalDeviceFeatures,
     pub queue_family_properties: Vec<ash::vk::QueueFamilyProperties>,
     pub gfx_compute_present_queue_family_index: u32, // for now just assumes that a combined graphics+compute+present will be available
+    pub optimal_depth_stencil_format: ash::vk::Format,
+}
+
+fn optimal_depth_stencil_format(
+    instance: &Instance,
+    physical_device: &PhysicalDevice,
+) -> ash::vk::Format {
+    let candidates = [
+        ash::vk::Format::D24_UNORM_S8_UINT,
+        ash::vk::Format::D32_SFLOAT_S8_UINT,
+        ash::vk::Format::D16_UNORM_S8_UINT,
+    ];
+    for &format in candidates.iter() {
+        let format_properties = unsafe {
+            instance
+                .instance
+                .get_physical_device_format_properties(physical_device.physical_device, format)
+        };
+        if format_properties
+            .optimal_tiling_features
+            .contains(ash::vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return format;
+        }
+    }
+    println!("Failed to find an optimal depth-stencil format");
+    return ash::vk::Format::D24_UNORM_S8_UINT;
 }
 
 impl PhysicalDevice {
@@ -267,6 +298,7 @@ impl PhysicalDevice {
                         .get_physical_device_queue_family_properties(physical_device)
                 },
                 gfx_compute_present_queue_family_index: 0,
+                optimal_depth_stencil_format: ash::vk::Format::UNDEFINED,
             };
 
             println!("Physical device {}: {:?} {}.{}.{} api {}.{}.{} vendor id 0x{:X} device id 0x{:X} device type {}",
@@ -321,6 +353,7 @@ impl PhysicalDevice {
                     "  Using queue family {}",
                     pdev.gfx_compute_present_queue_family_index
                 );
+                pdev.optimal_depth_stencil_format = optimal_depth_stencil_format(instance, &pdev);
                 result = Some(pdev);
             }
         }
@@ -490,36 +523,6 @@ fn memory_type_index_for_transient_image(
     return first_device_local_idx;
 }
 
-fn optimal_depth_stencil_format(
-    instance: &Instance,
-    physical_device: &PhysicalDevice,
-) -> ash::vk::Format {
-    let candidates = [
-        ash::vk::Format::D24_UNORM_S8_UINT,
-        ash::vk::Format::D32_SFLOAT_S8_UINT,
-        ash::vk::Format::D16_UNORM_S8_UINT,
-    ];
-    for &format in candidates.iter() {
-        let format_properties = unsafe {
-            instance
-                .instance
-                .get_physical_device_format_properties(physical_device.physical_device, format)
-        };
-        if format_properties
-            .optimal_tiling_features
-            .contains(ash::vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-        {
-            return format;
-        }
-    }
-    println!("Failed to find an optimal depth-stencil format");
-    return ash::vk::Format::D24_UNORM_S8_UINT;
-}
-
-fn aligned(v: u64, byte_alignment: u64) -> u64 {
-    (v + byte_alignment - 1) & !(byte_alignment - 1)
-}
-
 pub struct DepthStencilBuffer {
     image: ash::vk::Image,
     memory: ash::vk::DeviceMemory,
@@ -529,12 +532,11 @@ pub struct DepthStencilBuffer {
 
 impl DepthStencilBuffer {
     pub fn new(
-        instance: &Instance,
         physical_device: &PhysicalDevice,
         device: &Rc<Device>,
         pixel_size: ash::vk::Extent2D,
     ) -> Self {
-        let format = optimal_depth_stencil_format(instance, physical_device);
+        let format = physical_device.optimal_depth_stencil_format;
         let image_create_info = ash::vk::ImageCreateInfo {
             image_type: ash::vk::ImageType::TYPE_2D,
             format,
@@ -719,9 +721,9 @@ impl SwapchainBuilder {
         physical_device: &PhysicalDevice,
         device: &Rc<Device>,
         surface: &WindowSurface,
-        window: &winit::window::Window,
+        pixel_size: ash::vk::Extent2D,
     ) -> Result<Swapchain, ()> {
-        let image_extent = surface.pixel_size(instance, physical_device, window);
+        let image_extent = pixel_size;
         if image_extent.width == 0 || image_extent.height == 0 {
             return Err(());
         }
@@ -923,7 +925,11 @@ pub struct SwapchainRenderPass {
 }
 
 impl SwapchainRenderPass {
-    pub fn new(device: &Rc<Device>, swapchain: &Swapchain) -> Self {
+    pub fn new(
+        physical_device: &PhysicalDevice,
+        device: &Rc<Device>,
+        swapchain: &Swapchain,
+    ) -> Self {
         let color_attachment = ash::vk::AttachmentDescription {
             format: swapchain.format,
             samples: ash::vk::SampleCountFlags::TYPE_1,
@@ -939,10 +945,26 @@ impl SwapchainRenderPass {
             attachment: 0,
             layout: ash::vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         };
+        let ds_attachment = ash::vk::AttachmentDescription {
+            format: physical_device.optimal_depth_stencil_format,
+            samples: ash::vk::SampleCountFlags::TYPE_1,
+            load_op: ash::vk::AttachmentLoadOp::CLEAR,
+            store_op: ash::vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op: ash::vk::AttachmentLoadOp::CLEAR,
+            stencil_store_op: ash::vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: ash::vk::ImageLayout::UNDEFINED,
+            final_layout: ash::vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ..Default::default()
+        };
+        let ds_attachment_ref = ash::vk::AttachmentReference {
+            attachment: 1,
+            layout: ash::vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
         let subpass_desc = ash::vk::SubpassDescription {
             pipeline_bind_point: ash::vk::PipelineBindPoint::GRAPHICS,
             color_attachment_count: 1,
             p_color_attachments: &color_attachment_ref,
+            p_depth_stencil_attachment: &ds_attachment_ref,
             ..Default::default()
         };
         let subpass_dep = ash::vk::SubpassDependency {
@@ -954,9 +976,10 @@ impl SwapchainRenderPass {
             dst_access_mask: ash::vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
             ..Default::default()
         };
+        let attachments = [color_attachment, ds_attachment];
         let renderpass_create_info = ash::vk::RenderPassCreateInfo {
-            attachment_count: 1,
-            p_attachments: &color_attachment,
+            attachment_count: attachments.len() as u32,
+            p_attachments: attachments.as_ptr(),
             subpass_count: 1,
             p_subpasses: &subpass_desc,
             dependency_count: 1,
@@ -1007,13 +1030,15 @@ impl SwapchainFramebuffers {
         swapchain: &Swapchain,
         images: &SwapchainImages,
         render_pass: &SwapchainRenderPass,
+        depth_stencil_buffer: &DepthStencilBuffer,
     ) -> Self {
         let mut framebuffers: smallvec::SmallVec<[ash::vk::Framebuffer; 8]> = smallvec::smallvec![];
         for &view in images.views.iter() {
+            let attachments = [view, depth_stencil_buffer.view];
             let framebuffer_create_info = ash::vk::FramebufferCreateInfo {
                 render_pass: render_pass.render_pass,
-                attachment_count: 1,
-                p_attachments: &view,
+                attachment_count: attachments.len() as u32,
+                p_attachments: attachments.as_ptr(),
                 width: swapchain.pixel_size.width,
                 height: swapchain.pixel_size.height,
                 layers: 1,
@@ -1468,6 +1493,7 @@ impl SwapchainResizer {
         swapchain_images: &mut SwapchainImages,
         swapchain_framebuffers: &mut SwapchainFramebuffers,
         swapchain_frame_state: &mut SwapchainFrameState,
+        depth_stencil_buffer: &mut DepthStencilBuffer,
     ) -> bool {
         let current_pixel_size = surface.pixel_size(instance, physical_device, window);
         if current_pixel_size.width != 0 && current_pixel_size.height != 0 {
@@ -1477,16 +1503,26 @@ impl SwapchainResizer {
                 swapchain_framebuffers.release_resources();
                 swapchain_images.release_resources();
                 swapchain_frame_state.release_resources();
+                depth_stencil_buffer.release_resources();
                 *swapchain = SwapchainBuilder::new()
                     .with_existing(swapchain)
-                    .build(instance, physical_device, device, surface, window)
+                    .build(
+                        instance,
+                        physical_device,
+                        device,
+                        surface,
+                        current_pixel_size,
+                    )
                     .unwrap();
                 *swapchain_images = SwapchainImages::new(device, swapchain);
+                *depth_stencil_buffer =
+                    DepthStencilBuffer::new(physical_device, device, swapchain.pixel_size);
                 *swapchain_framebuffers = SwapchainFramebuffers::new(
                     device,
                     swapchain,
                     swapchain_images,
                     swapchain_render_pass,
+                    depth_stencil_buffer,
                 );
                 *swapchain_frame_state = SwapchainFrameState::new(device);
                 println!("Resized swapchain to {:?}", self.surface_size);
@@ -1897,6 +1933,7 @@ pub struct GraphicsPipelineBuilder<'a> {
     topology: ash::vk::PrimitiveTopology,
     cull_mode: ash::vk::CullModeFlags,
     front_face: ash::vk::FrontFace,
+    depth_stencil_state: ash::vk::PipelineDepthStencilStateCreateInfo,
 }
 
 impl<'a> GraphicsPipelineBuilder<'a> {
@@ -1910,6 +1947,7 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             topology: ash::vk::PrimitiveTopology::TRIANGLE_LIST,
             cull_mode: ash::vk::CullModeFlags::BACK,
             front_face: ash::vk::FrontFace::COUNTER_CLOCKWISE,
+            depth_stencil_state: Default::default(),
         }
     }
 
@@ -1952,6 +1990,14 @@ impl<'a> GraphicsPipelineBuilder<'a> {
 
     pub fn with_front_face(&mut self, front_face: ash::vk::FrontFace) -> &mut Self {
         self.front_face = front_face;
+        self
+    }
+
+    pub fn with_depth_stencil_state(
+        &mut self,
+        state: ash::vk::PipelineDepthStencilStateCreateInfo,
+    ) -> &mut Self {
+        self.depth_stencil_state = state;
         self
     }
 
@@ -2003,9 +2049,6 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             rasterization_samples: ash::vk::SampleCountFlags::TYPE_1,
             ..Default::default()
         };
-        let depth_stencil_state = ash::vk::PipelineDepthStencilStateCreateInfo {
-            ..Default::default()
-        };
         let color_blend_attachment_list = [ash::vk::PipelineColorBlendAttachmentState {
             color_write_mask: ash::vk::ColorComponentFlags::R
                 | ash::vk::ColorComponentFlags::G
@@ -2035,7 +2078,7 @@ impl<'a> GraphicsPipelineBuilder<'a> {
             p_viewport_state: &viewport_state,
             p_rasterization_state: &rasterization_state,
             p_multisample_state: &multisample_state,
-            p_depth_stencil_state: &depth_stencil_state,
+            p_depth_stencil_state: &self.depth_stencil_state,
             p_color_blend_state: &color_blend_state,
             p_dynamic_state: &dynamic_state,
             layout: self
@@ -2291,6 +2334,12 @@ impl Scene {
                     .with_render_pass(&swapchain_render_pass.render_pass)
                     .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
                     .with_cull_mode(ash::vk::CullModeFlags::NONE)
+                    .with_depth_stencil_state(ash::vk::PipelineDepthStencilStateCreateInfo {
+                        depth_test_enable: ash::vk::TRUE,
+                        depth_write_enable: ash::vk::TRUE,
+                        depth_compare_op: ash::vk::CompareOp::LESS,
+                        ..Default::default()
+                    })
                     .build(device, pipeline_cache)
                     .expect("Failed to build simple graphics pipeline"),
             );
@@ -2325,11 +2374,19 @@ impl Scene {
         let current_frame_slot = swapchain_frame_state.current_frame_slot;
         let current_image_index = swapchain_frame_state.current_image_index;
 
-        let clear_values = [ash::vk::ClearValue {
-            color: ash::vk::ClearColorValue {
-                float32: [0.0, 0.5, 0.0, 1.0],
+        let clear_values = [
+            ash::vk::ClearValue {
+                color: ash::vk::ClearColorValue {
+                    float32: [0.0, 0.5, 0.0, 1.0],
+                },
             },
-        }];
+            ash::vk::ClearValue {
+                depth_stencil: ash::vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ];
         let pass_begin_info = ash::vk::RenderPassBeginInfo {
             render_pass: swapchain_render_pass.render_pass,
             framebuffer: swapchain_framebuffers.framebuffers[current_image_index as usize],
@@ -2432,20 +2489,27 @@ impl App {
         let command_pool = CommandPool::new(&physical_device, &device);
         let command_list = CommandList::new(&device, &command_pool);
         let swapchain = SwapchainBuilder::new()
-            .build(&instance, &physical_device, &device, &surface, &window)
+            .build(
+                &instance,
+                &physical_device,
+                &device,
+                &surface,
+                surface.pixel_size(&instance, &physical_device, &window),
+            )
             .unwrap();
         let swapchain_images = SwapchainImages::new(&device, &swapchain);
-        let swapchain_render_pass = SwapchainRenderPass::new(&device, &swapchain);
+        let depth_stencil_buffer =
+            DepthStencilBuffer::new(&physical_device, &device, swapchain.pixel_size);
+        let swapchain_render_pass = SwapchainRenderPass::new(&physical_device, &device, &swapchain);
         let swapchain_framebuffers = SwapchainFramebuffers::new(
             &device,
             &swapchain,
             &swapchain_images,
             &swapchain_render_pass,
+            &depth_stencil_buffer,
         );
         let swapchain_frame_state = SwapchainFrameState::new(&device);
         let swapchain_resizer = SwapchainResizer::new();
-        let depth_stencil_buffer =
-            DepthStencilBuffer::new(&instance, &physical_device, &device, swapchain.pixel_size);
         let allocator = Rc::new(MemAllocator::new(&instance, &physical_device, &device));
         let pipeline_cache = PipelineCache::new(&device);
         let scene = Scene::new(&device, &allocator);
@@ -2502,6 +2566,7 @@ impl App {
             &mut self.swapchain_images,
             &mut self.swapchain_framebuffers,
             &mut self.swapchain_frame_state,
+            &mut self.depth_stencil_buffer,
         );
     }
 
