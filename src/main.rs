@@ -461,6 +461,178 @@ impl Drop for Device {
     }
 }
 
+fn memory_type_index_for_transient_image(
+    physical_device: &PhysicalDevice,
+    mem_req: &ash::vk::MemoryRequirements,
+) -> Option<u32> {
+    let mut first_device_local_idx: Option<u32> = None;
+    if mem_req.memory_type_bits != 0 {
+        for i in 0..physical_device.memory_properties.memory_type_count {
+            if (mem_req.memory_type_bits & (1 << i)) != 0 {
+                let memory_type = physical_device.memory_properties.memory_types[i as usize];
+                if memory_type
+                    .property_flags
+                    .contains(ash::vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                {
+                    if first_device_local_idx.is_none() {
+                        first_device_local_idx = Some(i);
+                    }
+                    if memory_type
+                        .property_flags
+                        .contains(ash::vk::MemoryPropertyFlags::LAZILY_ALLOCATED)
+                    {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+    }
+    return first_device_local_idx;
+}
+
+fn optimal_depth_stencil_format(
+    instance: &Instance,
+    physical_device: &PhysicalDevice,
+) -> ash::vk::Format {
+    let candidates = [
+        ash::vk::Format::D24_UNORM_S8_UINT,
+        ash::vk::Format::D32_SFLOAT_S8_UINT,
+        ash::vk::Format::D16_UNORM_S8_UINT,
+    ];
+    for &format in candidates.iter() {
+        let format_properties = unsafe {
+            instance
+                .instance
+                .get_physical_device_format_properties(physical_device.physical_device, format)
+        };
+        if format_properties
+            .optimal_tiling_features
+            .contains(ash::vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return format;
+        }
+    }
+    println!("Failed to find an optimal depth-stencil format");
+    return ash::vk::Format::D24_UNORM_S8_UINT;
+}
+
+fn aligned(v: u64, byte_alignment: u64) -> u64 {
+    (v + byte_alignment - 1) & !(byte_alignment - 1)
+}
+
+pub struct DepthStencilBuffer {
+    image: ash::vk::Image,
+    memory: ash::vk::DeviceMemory,
+    view: ash::vk::ImageView,
+    device: Option<Rc<Device>>,
+}
+
+impl DepthStencilBuffer {
+    pub fn new(
+        instance: &Instance,
+        physical_device: &PhysicalDevice,
+        device: &Rc<Device>,
+        pixel_size: ash::vk::Extent2D,
+    ) -> Self {
+        let format = optimal_depth_stencil_format(instance, physical_device);
+        let image_create_info = ash::vk::ImageCreateInfo {
+            image_type: ash::vk::ImageType::TYPE_2D,
+            format,
+            extent: ash::vk::Extent3D {
+                width: pixel_size.width,
+                height: pixel_size.height,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            samples: ash::vk::SampleCountFlags::TYPE_1,
+            tiling: ash::vk::ImageTiling::OPTIMAL,
+            usage: ash::vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                | ash::vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
+            initial_layout: ash::vk::ImageLayout::UNDEFINED,
+            ..Default::default()
+        };
+        let image = unsafe {
+            device
+                .device
+                .create_image(&image_create_info, None)
+                .expect("Failed to create VkImage for depth-stencil buffer")
+        };
+        let mem_req = unsafe { device.device.get_image_memory_requirements(image) };
+        let memory_type_index = memory_type_index_for_transient_image(physical_device, &mem_req)
+            .expect("Failed to find suitable memory index for depth-stencil buffer");
+        let memory_allocate_info = ash::vk::MemoryAllocateInfo {
+            allocation_size: aligned(mem_req.size, mem_req.alignment),
+            memory_type_index,
+            ..Default::default()
+        };
+        let memory = unsafe {
+            device
+                .device
+                .allocate_memory(&memory_allocate_info, None)
+                .expect("Failed to allocate memory for depth-stencil buffer")
+        };
+        unsafe {
+            device
+                .device
+                .bind_image_memory(image, memory, 0)
+                .expect("Failed to bind memory for depth-stencil buffer")
+        };
+        let view_create_info = ash::vk::ImageViewCreateInfo {
+            image,
+            view_type: ash::vk::ImageViewType::TYPE_2D,
+            format,
+            components: ash::vk::ComponentMapping {
+                r: ash::vk::ComponentSwizzle::IDENTITY,
+                g: ash::vk::ComponentSwizzle::IDENTITY,
+                b: ash::vk::ComponentSwizzle::IDENTITY,
+                a: ash::vk::ComponentSwizzle::IDENTITY,
+            },
+            subresource_range: ash::vk::ImageSubresourceRange {
+                aspect_mask: ash::vk::ImageAspectFlags::DEPTH | ash::vk::ImageAspectFlags::STENCIL,
+                level_count: 1,
+                layer_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = unsafe {
+            device
+                .device
+                .create_image_view(&view_create_info, None)
+                .expect("Failed to create depth-stencil image view")
+        };
+        DepthStencilBuffer {
+            image,
+            memory,
+            view,
+            device: Some(device.clone()),
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            let device = self.device.as_ref().unwrap();
+            unsafe {
+                device.device.destroy_image_view(self.view, None);
+                device.device.destroy_image(self.image, None);
+                device.device.free_memory(self.memory, None);
+            }
+            self.device = None;
+        }
+        self.image = ash::vk::Image::null();
+        self.memory = ash::vk::DeviceMemory::null();
+        self.view = ash::vk::ImageView::null();
+    }
+}
+
+impl Drop for DepthStencilBuffer {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
+
 bitflags! {
     pub struct SwapchainFlags: u32 {
         const ALLOW_READBACK = 0x01;
@@ -1561,8 +1733,10 @@ impl DescriptorPool {
         &self,
         layouts: &[&DescriptorSetLayout],
     ) -> Result<Vec<ash::vk::DescriptorSet>, ash::vk::Result> {
-        let set_layouts: smallvec::SmallVec<[ash::vk::DescriptorSetLayout; 8]> =
-            layouts.iter().map(|layout| layout.layout).collect();
+        let set_layouts = layouts
+            .iter()
+            .map(|layout| layout.layout)
+            .collect::<smallvec::SmallVec<[_; 8]>>();
         let allocate_info = ash::vk::DescriptorSetAllocateInfo {
             descriptor_pool: self.pool,
             descriptor_set_count: set_layouts.len() as u32,
@@ -1643,10 +1817,10 @@ impl PipelineLayout {
         desc_set_layouts: &[&DescriptorSetLayout],
         push_constant_ranges: &[ash::vk::PushConstantRange],
     ) -> Self {
-        let set_layouts: smallvec::SmallVec<[ash::vk::DescriptorSetLayout; 8]> = desc_set_layouts
+        let set_layouts = desc_set_layouts
             .iter()
             .map(|layout| layout.layout)
-            .collect();
+            .collect::<smallvec::SmallVec<[_; 8]>>();
         let layout_create_info = ash::vk::PipelineLayoutCreateInfo {
             set_layout_count: set_layouts.len() as u32,
             p_set_layouts: set_layouts.as_ptr(),
@@ -2238,6 +2412,7 @@ pub struct App {
     swapchain_framebuffers: SwapchainFramebuffers,
     swapchain_frame_state: SwapchainFrameState,
     swapchain_resizer: SwapchainResizer,
+    depth_stencil_buffer: DepthStencilBuffer,
     allocator: Rc<MemAllocator>,
     pipeline_cache: PipelineCache,
     scene: Scene,
@@ -2269,6 +2444,8 @@ impl App {
         );
         let swapchain_frame_state = SwapchainFrameState::new(&device);
         let swapchain_resizer = SwapchainResizer::new();
+        let depth_stencil_buffer =
+            DepthStencilBuffer::new(&instance, &physical_device, &device, swapchain.pixel_size);
         let allocator = Rc::new(MemAllocator::new(&instance, &physical_device, &device));
         let pipeline_cache = PipelineCache::new(&device);
         let scene = Scene::new(&device, &allocator);
@@ -2286,6 +2463,7 @@ impl App {
             swapchain_framebuffers,
             swapchain_frame_state,
             swapchain_resizer,
+            depth_stencil_buffer,
             allocator,
             pipeline_cache,
             scene,
@@ -2301,6 +2479,7 @@ impl App {
         self.swapchain_render_pass.release_resources();
         self.swapchain_images.release_resources();
         self.swapchain.release_resources();
+        self.depth_stencil_buffer.release_resources();
         self.command_pool.release_resources();
         self.pipeline_cache.release_resources();
         Rc::get_mut(&mut self.allocator)
