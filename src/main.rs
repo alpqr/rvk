@@ -1349,7 +1349,6 @@ impl SwapchainFrameState {
     ) {
         if flags.contains(EndFrameFlags::NO_RENDER_PASS) {
             self.transition(
-                device,
                 swapchain_images,
                 command_list,
                 ash::vk::AccessFlags::empty(),
@@ -1429,7 +1428,6 @@ impl SwapchainFrameState {
 
     fn transition(
         &self,
-        device: &Device,
         swapchain_images: &SwapchainImages,
         command_list: &CommandList,
         src_access_mask: ash::vk::AccessFlags,
@@ -1454,7 +1452,7 @@ impl SwapchainFrameState {
             ..Default::default()
         }];
         unsafe {
-            device.device.cmd_pipeline_barrier(
+            self.device.as_ref().unwrap().device.cmd_pipeline_barrier(
                 *self.current_frame_command_buffer(command_list),
                 src_stage_mask,
                 dst_stage_mask,
