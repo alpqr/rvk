@@ -786,16 +786,16 @@ impl SwapchainBuilder {
         } else {
             ash::vk::ImageUsageFlags::COLOR_ATTACHMENT
         };
+        let supported_present_modes = unsafe {
+            instance
+                .ext_surface
+                .get_physical_device_surface_present_modes(
+                    physical_device.physical_device,
+                    surface.surface,
+                )
+                .unwrap()
+        };
         let present_mode = if self.flags.contains(SwapchainFlags::NO_VSYNC) {
-            let supported_present_modes = unsafe {
-                instance
-                    .ext_surface
-                    .get_physical_device_surface_present_modes(
-                        physical_device.physical_device,
-                        surface.surface,
-                    )
-                    .unwrap()
-            };
             if supported_present_modes.contains(&ash::vk::PresentModeKHR::MAILBOX) {
                 ash::vk::PresentModeKHR::MAILBOX
             } else {
