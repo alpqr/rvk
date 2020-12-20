@@ -2327,21 +2327,25 @@ const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
 ];
 
 pub struct Scene {
-    triangle_ready: bool,
+    ready: bool,
+    device: Option<Rc<Device>>,
+    allocator: Option<Rc<MemAllocator>>,
+    descriptor_pool: Option<DescriptorPool>,
+    output_pixel_size: ash::vk::Extent2D,
+    projection: glm::Mat4,
+
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
     triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
+    color_desc_set_layout: Option<DescriptorSetLayout>,
     color_pipeline_layout: Option<PipelineLayout>,
     color_pipeline: Option<GraphicsPipeline>,
-    descriptor_pool: Option<DescriptorPool>,
-    color_desc_set_layout: Option<DescriptorSetLayout>,
     triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
     triangle_view: glm::Mat4,
     triangle_rotation: f32,
+
     some_texture: (ash::vk::Image, vk_mem::Allocation),
-    output_pixel_size: ash::vk::Extent2D,
-    projection: glm::Mat4,
-    device: Option<Rc<Device>>,
-    allocator: Option<Rc<MemAllocator>>,
+    texture_desc_set_layout: Option<DescriptorSetLayout>,
+    texture_pipeline_layout: Option<PipelineLayout>,
 }
 
 impl Scene {
@@ -2349,39 +2353,49 @@ impl Scene {
         let null_buf_and_alloc = (ash::vk::Buffer::null(), vk_mem::Allocation::null());
         let null_image_and_alloc = (ash::vk::Image::null(), vk_mem::Allocation::null());
         Scene {
-            triangle_ready: false,
-            triangle_vbuf: null_buf_and_alloc,
-            triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
-            color_pipeline_layout: None,
-            color_pipeline: None,
+            ready: false,
+            device: Some(device.clone()),
+            allocator: Some(allocator.clone()),
             descriptor_pool: None,
-            color_desc_set_layout: None,
-            triangle_desc_sets: vec![],
-            triangle_view: glm::identity(),
-            triangle_rotation: 0.0,
-            some_texture: null_image_and_alloc,
             output_pixel_size: ash::vk::Extent2D {
                 width: 0,
                 height: 0,
             },
             projection: glm::identity(),
-            device: Some(device.clone()),
-            allocator: Some(allocator.clone()),
+
+            triangle_vbuf: null_buf_and_alloc,
+            triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
+            color_desc_set_layout: None,
+            color_pipeline_layout: None,
+            color_pipeline: None,
+            triangle_desc_sets: vec![],
+            triangle_view: glm::identity(),
+            triangle_rotation: 0.0,
+
+            some_texture: null_image_and_alloc,
+            texture_desc_set_layout: None,
+            texture_pipeline_layout: None,
         }
     }
 
     pub fn release_resources(&mut self) {
-        self.color_desc_set_layout = None;
-        self.descriptor_pool = None;
         self.color_pipeline = None;
         self.color_pipeline_layout = None;
+        self.color_desc_set_layout = None;
+
+        self.texture_pipeline_layout = None;
+        self.texture_desc_set_layout = None;
+
+        self.descriptor_pool = None;
         if self.allocator.is_some() {
             let allocator = self.allocator.as_ref().unwrap();
             for buf_and_alloc in &self.triangle_ubufs {
                 allocator.destroy_buffer(buf_and_alloc);
             }
             allocator.destroy_buffer(&self.triangle_vbuf);
+
             allocator.destroy_image(&self.some_texture);
+
             self.allocator = None;
         }
         self.device = None;
@@ -2417,7 +2431,24 @@ impl Scene {
             self.projection[5] *= -1.0; // vertex data is Y up
         }
 
-        if !self.triangle_ready {
+        if !self.ready {
+            const MAX_DESC_SETS: u32 = 128;
+            self.descriptor_pool = Some(DescriptorPool::new(
+                device,
+                MAX_DESC_SETS,
+                &[
+                    ash::vk::DescriptorPoolSize {
+                        ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                        descriptor_count: MAX_DESC_SETS,
+                    },
+                    ash::vk::DescriptorPoolSize {
+                        ty: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        descriptor_count: MAX_DESC_SETS,
+                    },
+                ],
+            ));
+            let descriptor_pool = self.descriptor_pool.as_ref().unwrap();
+
             let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
             self.triangle_vbuf = allocator
                 .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
@@ -2482,16 +2513,6 @@ impl Scene {
                 );
             }
 
-            self.descriptor_pool = Some(DescriptorPool::new(
-                device,
-                FRAMES_IN_FLIGHT,
-                &[ash::vk::DescriptorPoolSize {
-                    ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: FRAMES_IN_FLIGHT,
-                }],
-            ));
-            let descriptor_pool = self.descriptor_pool.as_ref().unwrap();
-
             self.color_desc_set_layout = Some(DescriptorSetLayout::new(
                 device,
                 &[ash::vk::DescriptorSetLayoutBinding {
@@ -2504,11 +2525,12 @@ impl Scene {
                 }],
             ));
             let color_desc_set_layout = self.color_desc_set_layout.as_ref().unwrap();
+            self.color_pipeline_layout =
+                Some(PipelineLayout::new(device, &[color_desc_set_layout], &[]));
 
             self.triangle_desc_sets = descriptor_pool
                 .allocate(&[color_desc_set_layout; FRAMES_IN_FLIGHT as usize])
                 .expect("Failed to allocate descriptor sets for triangle");
-
             let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
                 smallvec::smallvec![];
             for i in 0..FRAMES_IN_FLIGHT {
@@ -2534,12 +2556,6 @@ impl Scene {
                 device.device.update_descriptor_sets(&desc_writes, &[]);
             }
 
-            let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
-            let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
-
-            self.color_pipeline_layout =
-                Some(PipelineLayout::new(device, &[color_desc_set_layout], &[]));
-
             let vertex_bindings = [ash::vk::VertexInputBindingDescription {
                 binding: 0,
                 stride: 6 * std::mem::size_of::<f32>() as u32,
@@ -2559,6 +2575,9 @@ impl Scene {
                     offset: 3 * std::mem::size_of::<f32>() as u32,
                 },
             ];
+
+            let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
+            let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
 
             let mut pipeline_builder = GraphicsPipelineBuilder::new();
             self.color_pipeline = Some(
@@ -2699,7 +2718,31 @@ impl Scene {
                 );
             }
 
-            self.triangle_ready = true;
+            self.texture_desc_set_layout = Some(DescriptorSetLayout::new(
+                device,
+                &[
+                    ash::vk::DescriptorSetLayoutBinding {
+                        binding: 0,
+                        descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                        descriptor_count: 1,
+                        stage_flags: ash::vk::ShaderStageFlags::VERTEX
+                            | ash::vk::ShaderStageFlags::FRAGMENT,
+                        ..Default::default()
+                    },
+                    ash::vk::DescriptorSetLayoutBinding {
+                        binding: 1,
+                        descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        descriptor_count: 1,
+                        stage_flags: ash::vk::ShaderStageFlags::FRAGMENT,
+                        ..Default::default()
+                    },
+                ],
+            ));
+            let texture_desc_set_layout = self.texture_desc_set_layout.as_ref().unwrap();
+            self.texture_pipeline_layout =
+                Some(PipelineLayout::new(device, &[texture_desc_set_layout], &[]));
+
+            self.ready = true;
         }
 
         let triangle_model = glm::rotate(
