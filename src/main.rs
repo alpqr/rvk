@@ -2300,7 +2300,9 @@ impl<'a> GraphicsPipelineBuilder<'a> {
 const VS_COLOR: &[u8] = std::include_bytes!("shaders/color.vert.spv");
 const FS_COLOR: &[u8] = std::include_bytes!("shaders/color.frag.spv");
 
-const IMAGE: &[u8] = std::include_bytes!("data/something.png");
+const IMAGE: &[u8] = std::include_bytes!("../data/something.png");
+const VS_TEXTURE: &[u8] = std::include_bytes!("shaders/texture.vert.spv");
+const FS_TEXTURE: &[u8] = std::include_bytes!("shaders/texture.frag.spv");
 
 #[repr(C)]
 struct TriangleVertex {
