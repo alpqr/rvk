@@ -2326,7 +2326,169 @@ const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
     },
 ];
 
-pub struct Scene {
+struct MaterialPipeline {
+    desc_set_layout: DescriptorSetLayout,
+    pipeline_layout: PipelineLayout,
+    pipeline: GraphicsPipeline,
+}
+
+fn new_color_material_pipeline(
+    device: &Rc<Device>,
+    pipeline_cache: &PipelineCache,
+    render_pass: &ash::vk::RenderPass,
+) -> MaterialPipeline {
+    let desc_set_layout = DescriptorSetLayout::new(
+        device,
+        &[ash::vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+            stage_flags: ash::vk::ShaderStageFlags::VERTEX | ash::vk::ShaderStageFlags::FRAGMENT,
+            ..Default::default()
+        }],
+    );
+    let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
+
+    let vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
+    let fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
+
+    let vertex_bindings = [ash::vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: 6 * std::mem::size_of::<f32>() as u32,
+        ..Default::default()
+    }];
+    let vertex_attributes = [
+        ash::vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: ash::vk::Format::R32G32B32_SFLOAT,
+            offset: 0,
+        },
+        ash::vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: ash::vk::Format::R32G32B32_SFLOAT,
+            offset: 3 * std::mem::size_of::<f32>() as u32,
+        },
+    ];
+
+    let pipeline = GraphicsPipelineBuilder::new()
+        .with_shader_stages(&[&vs, &fs])
+        .with_layout(&pipeline_layout)
+        .with_render_pass(render_pass)
+        .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
+        .with_cull_mode(ash::vk::CullModeFlags::NONE)
+        .with_depth_stencil_state(ash::vk::PipelineDepthStencilStateCreateInfo {
+            depth_test_enable: ash::vk::TRUE,
+            depth_write_enable: ash::vk::TRUE,
+            depth_compare_op: ash::vk::CompareOp::LESS,
+            ..Default::default()
+        })
+        .with_blend_state(ash::vk::PipelineColorBlendAttachmentState {
+            blend_enable: ash::vk::TRUE,
+            src_color_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_color_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            color_blend_op: ash::vk::BlendOp::ADD,
+            src_alpha_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_alpha_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            alpha_blend_op: ash::vk::BlendOp::ADD,
+            color_write_mask: rgba_color_write_mask(),
+            ..Default::default()
+        })
+        .build(device, pipeline_cache)
+        .expect("Failed to build simple graphics pipeline");
+
+    MaterialPipeline {
+        desc_set_layout,
+        pipeline_layout,
+        pipeline,
+    }
+}
+
+fn new_texture_material_pipeline(
+    device: &Rc<Device>,
+    pipeline_cache: &PipelineCache,
+    render_pass: &ash::vk::RenderPass,
+) -> MaterialPipeline {
+    let desc_set_layout = DescriptorSetLayout::new(
+        device,
+        &[
+            ash::vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                stage_flags: ash::vk::ShaderStageFlags::VERTEX
+                    | ash::vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
+            ash::vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: ash::vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
+        ],
+    );
+    let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
+
+    let vs = Shader::new(VS_TEXTURE, ash::vk::ShaderStageFlags::VERTEX, device);
+    let fs = Shader::new(FS_TEXTURE, ash::vk::ShaderStageFlags::FRAGMENT, device);
+
+    let vertex_bindings = [ash::vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: 5 * std::mem::size_of::<f32>() as u32,
+        ..Default::default()
+    }];
+    let vertex_attributes = [
+        ash::vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: ash::vk::Format::R32G32B32_SFLOAT,
+            offset: 0,
+        },
+        ash::vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: ash::vk::Format::R32G32_SFLOAT,
+            offset: 3 * std::mem::size_of::<f32>() as u32,
+        },
+    ];
+
+    let pipeline = GraphicsPipelineBuilder::new()
+        .with_shader_stages(&[&vs, &fs])
+        .with_layout(&pipeline_layout)
+        .with_render_pass(render_pass)
+        .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
+        .with_cull_mode(ash::vk::CullModeFlags::NONE)
+        .with_depth_stencil_state(ash::vk::PipelineDepthStencilStateCreateInfo {
+            depth_test_enable: ash::vk::TRUE,
+            depth_write_enable: ash::vk::TRUE,
+            depth_compare_op: ash::vk::CompareOp::LESS,
+            ..Default::default()
+        })
+        .with_blend_state(ash::vk::PipelineColorBlendAttachmentState {
+            blend_enable: ash::vk::TRUE,
+            src_color_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_color_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            color_blend_op: ash::vk::BlendOp::ADD,
+            src_alpha_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_alpha_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            alpha_blend_op: ash::vk::BlendOp::ADD,
+            color_write_mask: rgba_color_write_mask(),
+            ..Default::default()
+        })
+        .build(device, pipeline_cache)
+        .expect("Failed to build simple graphics pipeline");
+
+    MaterialPipeline {
+        desc_set_layout,
+        pipeline_layout,
+        pipeline,
+    }
+}
+
+struct Scene {
     ready: bool,
     device: Option<Rc<Device>>,
     allocator: Option<Rc<MemAllocator>>,
@@ -2334,18 +2496,16 @@ pub struct Scene {
     output_pixel_size: ash::vk::Extent2D,
     projection: glm::Mat4,
 
+    color_material_pipeline: Option<MaterialPipeline>,
+    texture_material_pipeline: Option<MaterialPipeline>,
+
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
     triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
-    color_desc_set_layout: Option<DescriptorSetLayout>,
-    color_pipeline_layout: Option<PipelineLayout>,
-    color_pipeline: Option<GraphicsPipeline>,
     triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
     triangle_view: glm::Mat4,
     triangle_rotation: f32,
 
     some_texture: (ash::vk::Image, vk_mem::Allocation),
-    texture_desc_set_layout: Option<DescriptorSetLayout>,
-    texture_pipeline_layout: Option<PipelineLayout>,
 }
 
 impl Scene {
@@ -2363,28 +2523,22 @@ impl Scene {
             },
             projection: glm::identity(),
 
+            color_material_pipeline: None,
+            texture_material_pipeline: None,
+
             triangle_vbuf: null_buf_and_alloc,
             triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
-            color_desc_set_layout: None,
-            color_pipeline_layout: None,
-            color_pipeline: None,
             triangle_desc_sets: vec![],
             triangle_view: glm::identity(),
             triangle_rotation: 0.0,
 
             some_texture: null_image_and_alloc,
-            texture_desc_set_layout: None,
-            texture_pipeline_layout: None,
         }
     }
 
     pub fn release_resources(&mut self) {
-        self.color_pipeline = None;
-        self.color_pipeline_layout = None;
-        self.color_desc_set_layout = None;
-
-        self.texture_pipeline_layout = None;
-        self.texture_desc_set_layout = None;
+        self.color_material_pipeline = None;
+        self.texture_material_pipeline = None;
 
         self.descriptor_pool = None;
         if self.allocator.is_some() {
@@ -2432,6 +2586,17 @@ impl Scene {
         }
 
         if !self.ready {
+            self.color_material_pipeline = Some(new_color_material_pipeline(
+                &device,
+                pipeline_cache,
+                &swapchain_render_pass.render_pass,
+            ));
+            self.texture_material_pipeline = Some(new_texture_material_pipeline(
+                &device,
+                pipeline_cache,
+                &swapchain_render_pass.render_pass,
+            ));
+
             const MAX_DESC_SETS: u32 = 128;
             self.descriptor_pool = Some(DescriptorPool::new(
                 device,
@@ -2447,7 +2612,6 @@ impl Scene {
                     },
                 ],
             ));
-            let descriptor_pool = self.descriptor_pool.as_ref().unwrap();
 
             let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
             self.triangle_vbuf = allocator
@@ -2513,23 +2677,17 @@ impl Scene {
                 );
             }
 
-            self.color_desc_set_layout = Some(DescriptorSetLayout::new(
-                device,
-                &[ash::vk::DescriptorSetLayoutBinding {
-                    binding: 0,
-                    descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: 1,
-                    stage_flags: ash::vk::ShaderStageFlags::VERTEX
-                        | ash::vk::ShaderStageFlags::FRAGMENT,
-                    ..Default::default()
-                }],
-            ));
-            let color_desc_set_layout = self.color_desc_set_layout.as_ref().unwrap();
-            self.color_pipeline_layout =
-                Some(PipelineLayout::new(device, &[color_desc_set_layout], &[]));
-
-            self.triangle_desc_sets = descriptor_pool
-                .allocate(&[color_desc_set_layout; FRAMES_IN_FLIGHT as usize])
+            self.triangle_desc_sets = self
+                .descriptor_pool
+                .as_ref()
+                .unwrap()
+                .allocate(
+                    &[&self
+                        .color_material_pipeline
+                        .as_ref()
+                        .unwrap()
+                        .desc_set_layout; FRAMES_IN_FLIGHT as usize],
+                )
                 .expect("Failed to allocate descriptor sets for triangle");
             let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
                 smallvec::smallvec![];
@@ -2555,58 +2713,6 @@ impl Scene {
             unsafe {
                 device.device.update_descriptor_sets(&desc_writes, &[]);
             }
-
-            let vertex_bindings = [ash::vk::VertexInputBindingDescription {
-                binding: 0,
-                stride: 6 * std::mem::size_of::<f32>() as u32,
-                ..Default::default()
-            }];
-            let vertex_attributes = [
-                ash::vk::VertexInputAttributeDescription {
-                    location: 0,
-                    binding: 0,
-                    format: ash::vk::Format::R32G32B32_SFLOAT,
-                    offset: 0,
-                },
-                ash::vk::VertexInputAttributeDescription {
-                    location: 1,
-                    binding: 0,
-                    format: ash::vk::Format::R32G32B32_SFLOAT,
-                    offset: 3 * std::mem::size_of::<f32>() as u32,
-                },
-            ];
-
-            let color_vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
-            let color_fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
-
-            let mut pipeline_builder = GraphicsPipelineBuilder::new();
-            self.color_pipeline = Some(
-                pipeline_builder
-                    .with_shader_stages(&[&color_vs, &color_fs])
-                    .with_layout(&self.color_pipeline_layout.as_ref().unwrap())
-                    .with_render_pass(&swapchain_render_pass.render_pass)
-                    .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
-                    .with_cull_mode(ash::vk::CullModeFlags::NONE)
-                    .with_depth_stencil_state(ash::vk::PipelineDepthStencilStateCreateInfo {
-                        depth_test_enable: ash::vk::TRUE,
-                        depth_write_enable: ash::vk::TRUE,
-                        depth_compare_op: ash::vk::CompareOp::LESS,
-                        ..Default::default()
-                    })
-                    .with_blend_state(ash::vk::PipelineColorBlendAttachmentState {
-                        blend_enable: ash::vk::TRUE,
-                        src_color_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
-                        dst_color_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-                        color_blend_op: ash::vk::BlendOp::ADD,
-                        src_alpha_blend_factor: ash::vk::BlendFactor::ONE,
-                        dst_alpha_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-                        alpha_blend_op: ash::vk::BlendOp::ADD,
-                        color_write_mask: rgba_color_write_mask(),
-                        ..Default::default()
-                    })
-                    .build(device, pipeline_cache)
-                    .expect("Failed to build simple graphics pipeline"),
-            );
 
             let image_data = image::load_from_memory_with_format(IMAGE, image::ImageFormat::Png)
                 .expect("Failed to load image");
@@ -2718,30 +2824,6 @@ impl Scene {
                 );
             }
 
-            self.texture_desc_set_layout = Some(DescriptorSetLayout::new(
-                device,
-                &[
-                    ash::vk::DescriptorSetLayoutBinding {
-                        binding: 0,
-                        descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                        descriptor_count: 1,
-                        stage_flags: ash::vk::ShaderStageFlags::VERTEX
-                            | ash::vk::ShaderStageFlags::FRAGMENT,
-                        ..Default::default()
-                    },
-                    ash::vk::DescriptorSetLayoutBinding {
-                        binding: 1,
-                        descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        descriptor_count: 1,
-                        stage_flags: ash::vk::ShaderStageFlags::FRAGMENT,
-                        ..Default::default()
-                    },
-                ],
-            ));
-            let texture_desc_set_layout = self.texture_desc_set_layout.as_ref().unwrap();
-            self.texture_pipeline_layout =
-                Some(PipelineLayout::new(device, &[texture_desc_set_layout], &[]));
-
             self.ready = true;
         }
 
@@ -2807,7 +2889,11 @@ impl Scene {
             device.device.cmd_bind_pipeline(
                 *cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
-                self.color_pipeline.as_ref().unwrap().pipeline,
+                self.color_material_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .pipeline
+                    .pipeline,
             );
             device.device.cmd_set_viewport(
                 *cb,
@@ -2832,7 +2918,11 @@ impl Scene {
             device.device.cmd_bind_descriptor_sets(
                 *cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
-                self.color_pipeline_layout.as_ref().unwrap().layout,
+                self.color_material_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .pipeline_layout
+                    .layout,
                 0,
                 &[self.triangle_desc_sets[current_frame_slot as usize]],
                 &[],
