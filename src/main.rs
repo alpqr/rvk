@@ -1979,7 +1979,7 @@ pub struct Shader {
 }
 
 impl Shader {
-    pub fn new(spv: &[u8], stage: ash::vk::ShaderStageFlags, device: &Rc<Device>) -> Self {
+    pub fn new(device: &Rc<Device>, spv: &[u8], stage: ash::vk::ShaderStageFlags) -> Self {
         let shader_module_create_info = ash::vk::ShaderModuleCreateInfo {
             code_size: spv.len(),
             p_code: spv.as_ptr() as *const u32,
@@ -2297,40 +2297,95 @@ impl<'a> GraphicsPipelineBuilder<'a> {
     }
 }
 
-const VS_COLOR: &[u8] = std::include_bytes!("shaders/color.vert.spv");
-const FS_COLOR: &[u8] = std::include_bytes!("shaders/color.frag.spv");
-
-const IMAGE: &[u8] = std::include_bytes!("../data/something.png");
-const VS_TEXTURE: &[u8] = std::include_bytes!("shaders/texture.vert.spv");
-const FS_TEXTURE: &[u8] = std::include_bytes!("shaders/texture.frag.spv");
-
-#[repr(C)]
-struct TriangleVertex {
-    pos: [f32; 3],
-    color: [f32; 3],
+pub struct Sampler {
+    sampler: ash::vk::Sampler,
+    device: Option<Rc<Device>>,
 }
 
-const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
-    // Y up, front=CCW
-    TriangleVertex {
-        pos: [0.0, 0.5, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    TriangleVertex {
-        pos: [-0.5, -0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
-    TriangleVertex {
-        pos: [0.5, -0.5, 0.0],
-        color: [0.0, 0.0, 1.0],
-    },
-];
+impl Sampler {
+    pub fn new(device: &Rc<Device>, create_info: &ash::vk::SamplerCreateInfo) -> Self {
+        let sampler = unsafe {
+            device
+                .device
+                .create_sampler(&create_info, None)
+                .expect("Failed to create sampler")
+        };
+        Sampler {
+            sampler,
+            device: Some(device.clone()),
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            unsafe {
+                self.device
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_sampler(self.sampler, None);
+            };
+            self.device = None;
+        }
+        self.sampler = ash::vk::Sampler::null();
+    }
+}
+
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
+
+pub struct ImageView {
+    view: ash::vk::ImageView,
+    device: Option<Rc<Device>>,
+}
+
+impl ImageView {
+    pub fn new(device: &Rc<Device>, create_info: &ash::vk::ImageViewCreateInfo) -> Self {
+        let view = unsafe {
+            device
+                .device
+                .create_image_view(&create_info, None)
+                .expect("Failed to create image view")
+        };
+        ImageView {
+            view,
+            device: Some(device.clone()),
+        }
+    }
+
+    pub fn release_resources(&mut self) {
+        if self.device.is_some() {
+            unsafe {
+                self.device
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_image_view(self.view, None);
+            };
+            self.device = None;
+        }
+        self.view = ash::vk::ImageView::null();
+    }
+}
+
+impl Drop for ImageView {
+    fn drop(&mut self) {
+        self.release_resources();
+    }
+}
 
 struct MaterialPipeline {
     desc_set_layout: DescriptorSetLayout,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
 }
+
+const COLOR_MATERIAL_VS: &[u8] = std::include_bytes!("shaders/color.vert.spv");
+const COLOR_MATERIAL_FS: &[u8] = std::include_bytes!("shaders/color.frag.spv");
+const COLOR_MATERIAL_UBUF_SIZE: usize = 68;
 
 fn new_color_material_pipeline(
     device: &Rc<Device>,
@@ -2349,8 +2404,12 @@ fn new_color_material_pipeline(
     );
     let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
 
-    let vs = Shader::new(VS_COLOR, ash::vk::ShaderStageFlags::VERTEX, device);
-    let fs = Shader::new(FS_COLOR, ash::vk::ShaderStageFlags::FRAGMENT, device);
+    let vs = Shader::new(device, COLOR_MATERIAL_VS, ash::vk::ShaderStageFlags::VERTEX);
+    let fs = Shader::new(
+        device,
+        COLOR_MATERIAL_FS,
+        ash::vk::ShaderStageFlags::FRAGMENT,
+    );
 
     let vertex_bindings = [ash::vk::VertexInputBindingDescription {
         binding: 0,
@@ -2405,6 +2464,10 @@ fn new_color_material_pipeline(
     }
 }
 
+const TEXTURE_MATERIAL_VS: &[u8] = std::include_bytes!("shaders/texture.vert.spv");
+const TEXTURE_MATERIAL_FS: &[u8] = std::include_bytes!("shaders/texture.frag.spv");
+const TEXTURE_MATERIAL_UBUF_SIZE: usize = 64;
+
 fn new_texture_material_pipeline(
     device: &Rc<Device>,
     pipeline_cache: &PipelineCache,
@@ -2432,8 +2495,16 @@ fn new_texture_material_pipeline(
     );
     let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
 
-    let vs = Shader::new(VS_TEXTURE, ash::vk::ShaderStageFlags::VERTEX, device);
-    let fs = Shader::new(FS_TEXTURE, ash::vk::ShaderStageFlags::FRAGMENT, device);
+    let vs = Shader::new(
+        device,
+        TEXTURE_MATERIAL_VS,
+        ash::vk::ShaderStageFlags::VERTEX,
+    );
+    let fs = Shader::new(
+        device,
+        TEXTURE_MATERIAL_FS,
+        ash::vk::ShaderStageFlags::FRAGMENT,
+    );
 
     let vertex_bindings = [ash::vk::VertexInputBindingDescription {
         binding: 0,
@@ -2467,17 +2538,6 @@ fn new_texture_material_pipeline(
             depth_compare_op: ash::vk::CompareOp::LESS,
             ..Default::default()
         })
-        .with_blend_state(ash::vk::PipelineColorBlendAttachmentState {
-            blend_enable: ash::vk::TRUE,
-            src_color_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
-            dst_color_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-            color_blend_op: ash::vk::BlendOp::ADD,
-            src_alpha_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
-            dst_alpha_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-            alpha_blend_op: ash::vk::BlendOp::ADD,
-            color_write_mask: rgba_color_write_mask(),
-            ..Default::default()
-        })
         .build(device, pipeline_cache)
         .expect("Failed to build simple graphics pipeline");
 
@@ -2486,6 +2546,324 @@ fn new_texture_material_pipeline(
         pipeline_layout,
         pipeline,
     }
+}
+
+#[repr(C)]
+struct TriangleVertex {
+    pos: [f32; 3],
+    color: [f32; 3],
+}
+
+const TRIANGLE_VERTICES: [TriangleVertex; 3] = [
+    // Y up, front=CCW
+    TriangleVertex {
+        pos: [0.0, 0.5, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    TriangleVertex {
+        pos: [-0.5, -0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    TriangleVertex {
+        pos: [0.5, -0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+];
+
+fn create_triangle_vertex_buffer(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
+    let vbuf = allocator
+        .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
+        .unwrap();
+    let staging_buf = allocator.create_staging_buffer(vbuf_len).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&staging_buf);
+    allocator.update_host_visible_buffer(
+        &staging_buf.1,
+        0,
+        vbuf_len,
+        0,
+        &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
+    );
+    let copy_info = [ash::vk::BufferCopy {
+        size: vbuf_len as u64,
+        ..Default::default()
+    }];
+    let barrier_info = [ash::vk::BufferMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        dst_access_mask: ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        buffer: vbuf.0,
+        size: vbuf_len as u64,
+        ..Default::default()
+    }];
+    unsafe {
+        device
+            .device
+            .cmd_copy_buffer(*cb, staging_buf.0, vbuf.0, &copy_info);
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::PipelineStageFlags::VERTEX_INPUT,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &barrier_info,
+            &[],
+        );
+    }
+    vbuf
+}
+
+#[repr(C)]
+struct TexturedQuadVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+}
+
+const TEXTURED_QUAD_VERTICES: [TexturedQuadVertex; 4] = [
+    // Y up, V up, front=CCW
+    TexturedQuadVertex {
+        pos: [-1.0, -1.0, 0.0],
+        uv: [0.0, 0.0],
+    },
+    TexturedQuadVertex {
+        pos: [-1.0, 1.0, 0.0],
+        uv: [0.0, 1.0],
+    },
+    TexturedQuadVertex {
+        pos: [1.0, 1.0, 0.0],
+        uv: [1.0, 1.0],
+    },
+    TexturedQuadVertex {
+        pos: [1.0, -1.0, 0.0],
+        uv: [1.0, 0.0],
+    },
+];
+
+const TEXTURED_QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
+
+fn create_textured_quad_vertex_buffer(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let vbuf_len = TEXTURED_QUAD_VERTICES.len() * std::mem::size_of::<TexturedQuadVertex>();
+    let vbuf = allocator
+        .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
+        .unwrap();
+    let staging_buf = allocator.create_staging_buffer(vbuf_len).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&staging_buf);
+    allocator.update_host_visible_buffer(
+        &staging_buf.1,
+        0,
+        vbuf_len,
+        0,
+        &[(TEXTURED_QUAD_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
+    );
+    let copy_info = [ash::vk::BufferCopy {
+        size: vbuf_len as u64,
+        ..Default::default()
+    }];
+    let barrier_info = [ash::vk::BufferMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        dst_access_mask: ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        buffer: vbuf.0,
+        size: vbuf_len as u64,
+        ..Default::default()
+    }];
+    unsafe {
+        device
+            .device
+            .cmd_copy_buffer(*cb, staging_buf.0, vbuf.0, &copy_info);
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::PipelineStageFlags::VERTEX_INPUT,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &barrier_info,
+            &[],
+        );
+    }
+    vbuf
+}
+
+fn create_textured_quad_index_buffer(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let ibuf_len = TEXTURED_QUAD_INDICES.len() * std::mem::size_of::<u16>();
+    let ibuf = allocator
+        .create_device_local_buffer(ibuf_len, ash::vk::BufferUsageFlags::INDEX_BUFFER)
+        .unwrap();
+    let staging_buf = allocator.create_staging_buffer(ibuf_len).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&staging_buf);
+    allocator.update_host_visible_buffer(
+        &staging_buf.1,
+        0,
+        ibuf_len,
+        0,
+        &[(TEXTURED_QUAD_INDICES.as_ptr() as *const u8, 0, ibuf_len)],
+    );
+    let copy_info = [ash::vk::BufferCopy {
+        size: ibuf_len as u64,
+        ..Default::default()
+    }];
+    let barrier_info = [ash::vk::BufferMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        dst_access_mask: ash::vk::AccessFlags::INDEX_READ,
+        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        buffer: ibuf.0,
+        size: ibuf_len as u64,
+        ..Default::default()
+    }];
+    unsafe {
+        device
+            .device
+            .cmd_copy_buffer(*cb, staging_buf.0, ibuf.0, &copy_info);
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::PipelineStageFlags::VERTEX_INPUT,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &barrier_info,
+            &[],
+        );
+    }
+    ibuf
+}
+
+const IMAGE: &[u8] = std::include_bytes!("../data/something.png");
+
+fn create_something_texture(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+) -> (ash::vk::Image, vk_mem::Allocation) {
+    let image_data = image::load_from_memory_with_format(IMAGE, image::ImageFormat::Png)
+        .expect("Failed to load image")
+        .flipv();
+    let rgba8_image_data = match image_data {
+        image::DynamicImage::ImageRgb8(_)
+        | image::DynamicImage::ImageRgba8(_)
+        | image::DynamicImage::ImageBgr8(_)
+        | image::DynamicImage::ImageBgra8(_) => image_data.into_rgba8(),
+        _ => panic!("Unsupported image format"),
+    };
+    let pixels: &Vec<u8> = rgba8_image_data.as_raw();
+    let image_extent = ash::vk::Extent3D {
+        width: rgba8_image_data.width(),
+        height: rgba8_image_data.height(),
+        depth: 1,
+    };
+    let image_create_info = ash::vk::ImageCreateInfo {
+        image_type: ash::vk::ImageType::TYPE_2D,
+        format: ash::vk::Format::R8G8B8A8_UNORM,
+        extent: image_extent,
+        mip_levels: 1,
+        array_layers: 1,
+        samples: ash::vk::SampleCountFlags::TYPE_1,
+        tiling: ash::vk::ImageTiling::OPTIMAL,
+        usage: ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_DST,
+        sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
+        initial_layout: ash::vk::ImageLayout::PREINITIALIZED,
+        ..Default::default()
+    };
+    let texture = allocator.create_image(&image_create_info).unwrap();
+    let image_staging_buf = allocator.create_staging_buffer(pixels.len()).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&image_staging_buf);
+    allocator.update_host_visible_buffer(
+        &image_staging_buf.1,
+        0,
+        pixels.len(),
+        0,
+        &[(pixels.as_ptr() as *const u8, 0, pixels.len())],
+    );
+    let buffer_image_copy = [ash::vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: image_extent.width,
+        buffer_image_height: image_extent.height,
+        image_subresource: ash::vk::ImageSubresourceLayers {
+            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
+        image_extent,
+        ..Default::default()
+    }];
+    let buffer_image_copy_before_barrier = [ash::vk::ImageMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::empty(),
+        dst_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        old_layout: ash::vk::ImageLayout::PREINITIALIZED,
+        new_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        image: texture.0,
+        subresource_range: ash::vk::ImageSubresourceRange {
+            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        ..Default::default()
+    }];
+    let buffer_image_copy_after_barrier = [ash::vk::ImageMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        dst_access_mask: ash::vk::AccessFlags::SHADER_READ,
+        old_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        new_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        image: texture.0,
+        subresource_range: ash::vk::ImageSubresourceRange {
+            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        ..Default::default()
+    }];
+    unsafe {
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TOP_OF_PIPE,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &buffer_image_copy_before_barrier,
+        );
+        device.device.cmd_copy_buffer_to_image(
+            *cb,
+            image_staging_buf.0,
+            texture.0,
+            ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &buffer_image_copy,
+        );
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &buffer_image_copy_after_barrier,
+        );
+    }
+    texture
 }
 
 struct Scene {
@@ -2500,12 +2878,20 @@ struct Scene {
     texture_material_pipeline: Option<MaterialPipeline>,
 
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
+    quad_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
+    quad_ibuf: (ash::vk::Buffer, vk_mem::Allocation),
+    some_texture: (ash::vk::Image, vk_mem::Allocation),
+    some_texture_view: Option<ImageView>,
+    linear_sampler: Option<Sampler>,
+
     triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
     triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
     triangle_view: glm::Mat4,
     triangle_rotation: f32,
 
-    some_texture: (ash::vk::Image, vk_mem::Allocation),
+    textured_quad_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
+    textured_quad_desc_sets: Vec<ash::vk::DescriptorSet>,
+    textured_quad_view: glm::Mat4,
 }
 
 impl Scene {
@@ -2527,29 +2913,44 @@ impl Scene {
             texture_material_pipeline: None,
 
             triangle_vbuf: null_buf_and_alloc,
+            quad_vbuf: null_buf_and_alloc,
+            quad_ibuf: null_buf_and_alloc,
+            some_texture: null_image_and_alloc,
+            some_texture_view: None,
+            linear_sampler: None,
+
             triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
             triangle_desc_sets: vec![],
             triangle_view: glm::identity(),
             triangle_rotation: 0.0,
 
-            some_texture: null_image_and_alloc,
+            textured_quad_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
+            textured_quad_desc_sets: vec![],
+            textured_quad_view: glm::identity(),
         }
     }
 
     pub fn release_resources(&mut self) {
+        // Objects holding a ref to the Device or Allocator must be dropped
+        // here, before this function returns.
+        self.some_texture_view = None;
+        self.linear_sampler = None;
         self.color_material_pipeline = None;
         self.texture_material_pipeline = None;
-
         self.descriptor_pool = None;
+
         if self.allocator.is_some() {
             let allocator = self.allocator.as_ref().unwrap();
             for buf_and_alloc in &self.triangle_ubufs {
                 allocator.destroy_buffer(buf_and_alloc);
             }
+            for buf_and_alloc in &self.textured_quad_ubufs {
+                allocator.destroy_buffer(buf_and_alloc);
+            }
             allocator.destroy_buffer(&self.triangle_vbuf);
-
+            allocator.destroy_buffer(&self.quad_vbuf);
+            allocator.destroy_buffer(&self.quad_ibuf);
             allocator.destroy_image(&self.some_texture);
-
             self.allocator = None;
         }
         self.device = None;
@@ -2587,12 +2988,12 @@ impl Scene {
 
         if !self.ready {
             self.color_material_pipeline = Some(new_color_material_pipeline(
-                &device,
+                device,
                 pipeline_cache,
                 &swapchain_render_pass.render_pass,
             ));
             self.texture_material_pipeline = Some(new_texture_material_pipeline(
-                &device,
+                device,
                 pipeline_cache,
                 &swapchain_render_pass.render_pass,
             ));
@@ -2613,63 +3014,64 @@ impl Scene {
                 ],
             ));
 
-            let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
-            self.triangle_vbuf = allocator
-                .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
-                .unwrap();
-            let triangle_vbuf_staging = allocator.create_staging_buffer(vbuf_len).unwrap();
-            swapchain_frame_state.deferred_release_buffer(&triangle_vbuf_staging);
-            allocator.update_host_visible_buffer(
-                &triangle_vbuf_staging.1,
-                0,
-                vbuf_len,
-                0,
-                &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
-            );
-            let triangle_vbuf_copy = [ash::vk::BufferCopy {
-                size: vbuf_len as u64,
-                ..Default::default()
-            }];
-            let triangle_vbuf_barrier = [ash::vk::BufferMemoryBarrier {
-                src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-                dst_access_mask: ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-                src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-                buffer: self.triangle_vbuf.0,
-                size: vbuf_len as u64,
-                ..Default::default()
-            }];
-            unsafe {
-                device.device.cmd_copy_buffer(
-                    *cb,
-                    triangle_vbuf_staging.0,
-                    self.triangle_vbuf.0,
-                    &triangle_vbuf_copy,
-                );
-                device.device.cmd_pipeline_barrier(
-                    *cb,
-                    ash::vk::PipelineStageFlags::TRANSFER,
-                    ash::vk::PipelineStageFlags::VERTEX_INPUT,
-                    ash::vk::DependencyFlags::empty(),
-                    &[],
-                    &triangle_vbuf_barrier,
-                    &[],
-                );
-            }
+            self.triangle_vbuf =
+                create_triangle_vertex_buffer(device, &allocator, swapchain_frame_state, cb);
+
+            self.quad_vbuf =
+                create_textured_quad_vertex_buffer(device, &allocator, swapchain_frame_state, cb);
+            self.quad_ibuf =
+                create_textured_quad_index_buffer(device, &allocator, swapchain_frame_state, cb);
+
+            self.some_texture =
+                create_something_texture(device, &allocator, swapchain_frame_state, cb);
+
+            self.some_texture_view = Some(ImageView::new(
+                device,
+                &ash::vk::ImageViewCreateInfo {
+                    image: self.some_texture.0,
+                    view_type: ash::vk::ImageViewType::TYPE_2D,
+                    format: ash::vk::Format::R8G8B8A8_UNORM,
+                    components: ash::vk::ComponentMapping {
+                        r: ash::vk::ComponentSwizzle::IDENTITY,
+                        g: ash::vk::ComponentSwizzle::IDENTITY,
+                        b: ash::vk::ComponentSwizzle::IDENTITY,
+                        a: ash::vk::ComponentSwizzle::IDENTITY,
+                    },
+                    subresource_range: ash::vk::ImageSubresourceRange {
+                        aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                },
+            ));
+
+            self.linear_sampler = Some(Sampler::new(
+                device,
+                &ash::vk::SamplerCreateInfo {
+                    mag_filter: ash::vk::Filter::LINEAR,
+                    min_filter: ash::vk::Filter::LINEAR,
+                    address_mode_u: ash::vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    address_mode_v: ash::vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                    max_lod: 0.25,
+                    ..Default::default()
+                },
+            ));
 
             self.triangle_view = glm::translate(&glm::identity(), &glm::vec3(0.0, 0.0, -4.0));
 
-            const COLOR_UBUF_SIZE: usize = 68;
-            for i in 0..FRAMES_IN_FLIGHT {
-                self.triangle_ubufs[i as usize] = allocator
+            for frame_slot in 0..FRAMES_IN_FLIGHT {
+                self.triangle_ubufs[frame_slot as usize] = allocator
                     .create_host_visible_buffer(
-                        COLOR_UBUF_SIZE,
+                        COLOR_MATERIAL_UBUF_SIZE,
                         ash::vk::BufferUsageFlags::UNIFORM_BUFFER,
                     )
                     .unwrap();
                 let opacity = [0.5f32];
                 allocator.update_host_visible_buffer(
-                    &self.triangle_ubufs[i as usize].1,
+                    &self.triangle_ubufs[frame_slot as usize].1,
                     64,
                     4,
                     0,
@@ -2691,22 +3093,22 @@ impl Scene {
                 .expect("Failed to allocate descriptor sets for triangle");
             let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
                 smallvec::smallvec![];
-            for i in 0..FRAMES_IN_FLIGHT {
+            for frame_slot in 0..FRAMES_IN_FLIGHT {
                 desc_buffer_infos.push(ash::vk::DescriptorBufferInfo {
-                    buffer: self.triangle_ubufs[i as usize].0,
+                    buffer: self.triangle_ubufs[frame_slot as usize].0,
                     offset: 0,
-                    range: COLOR_UBUF_SIZE as u64,
+                    range: COLOR_MATERIAL_UBUF_SIZE as u64,
                 });
             }
             let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
                 smallvec::smallvec![];
-            for i in 0..FRAMES_IN_FLIGHT {
+            for frame_slot in 0..FRAMES_IN_FLIGHT {
                 desc_writes.push(ash::vk::WriteDescriptorSet {
-                    dst_set: self.triangle_desc_sets[i as usize],
+                    dst_set: self.triangle_desc_sets[frame_slot as usize],
                     dst_binding: 0,
                     descriptor_count: 1,
                     descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
-                    p_buffer_info: &desc_buffer_infos[i as usize],
+                    p_buffer_info: &desc_buffer_infos[frame_slot as usize],
                     ..Default::default()
                 });
             }
@@ -2714,114 +3116,66 @@ impl Scene {
                 device.device.update_descriptor_sets(&desc_writes, &[]);
             }
 
-            let image_data = image::load_from_memory_with_format(IMAGE, image::ImageFormat::Png)
-                .expect("Failed to load image");
-            let rgba8_image_data = match image_data {
-                image::DynamicImage::ImageRgb8(_)
-                | image::DynamicImage::ImageRgba8(_)
-                | image::DynamicImage::ImageBgr8(_)
-                | image::DynamicImage::ImageBgra8(_) => image_data.into_rgba8(),
-                _ => panic!("Unsupported image format"),
-            };
-            let pixels: &Vec<u8> = rgba8_image_data.as_raw();
-            let image_extent = ash::vk::Extent3D {
-                width: rgba8_image_data.width(),
-                height: rgba8_image_data.height(),
-                depth: 1,
-            };
-            let image_create_info = ash::vk::ImageCreateInfo {
-                image_type: ash::vk::ImageType::TYPE_2D,
-                format: ash::vk::Format::R8G8B8A8_UNORM,
-                extent: image_extent,
-                mip_levels: 1,
-                array_layers: 1,
-                samples: ash::vk::SampleCountFlags::TYPE_1,
-                tiling: ash::vk::ImageTiling::OPTIMAL,
-                usage: ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_DST,
-                sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
-                initial_layout: ash::vk::ImageLayout::PREINITIALIZED,
+            self.textured_quad_view = glm::translate(&glm::identity(), &glm::vec3(-4.0, 0.0, -8.0));
+
+            for i in 0..FRAMES_IN_FLIGHT {
+                self.textured_quad_ubufs[i as usize] = allocator
+                    .create_host_visible_buffer(
+                        TEXTURE_MATERIAL_UBUF_SIZE,
+                        ash::vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    )
+                    .unwrap();
+            }
+
+            self.textured_quad_desc_sets = self
+                .descriptor_pool
+                .as_ref()
+                .unwrap()
+                .allocate(
+                    &[&self
+                        .texture_material_pipeline
+                        .as_ref()
+                        .unwrap()
+                        .desc_set_layout; FRAMES_IN_FLIGHT as usize],
+                )
+                .expect("Failed to allocate descriptor sets for textured quad");
+            let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
+                smallvec::smallvec![];
+            for i in 0..FRAMES_IN_FLIGHT {
+                desc_buffer_infos.push(ash::vk::DescriptorBufferInfo {
+                    buffer: self.textured_quad_ubufs[i as usize].0,
+                    offset: 0,
+                    range: TEXTURE_MATERIAL_UBUF_SIZE as u64,
+                });
+            }
+            let desc_image_info = ash::vk::DescriptorImageInfo {
+                sampler: self.linear_sampler.as_ref().unwrap().sampler,
+                image_view: self.some_texture_view.as_ref().unwrap().view,
+                image_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 ..Default::default()
             };
-            self.some_texture = allocator.create_image(&image_create_info).unwrap();
-            let image_staging_buf = allocator.create_staging_buffer(pixels.len()).unwrap();
-            swapchain_frame_state.deferred_release_buffer(&image_staging_buf);
-            allocator.update_host_visible_buffer(
-                &image_staging_buf.1,
-                0,
-                pixels.len(),
-                0,
-                &[(pixels.as_ptr() as *const u8, 0, pixels.len())],
-            );
-            let buffer_image_copy = [ash::vk::BufferImageCopy {
-                buffer_offset: 0,
-                buffer_row_length: image_extent.width,
-                buffer_image_height: image_extent.height,
-                image_subresource: ash::vk::ImageSubresourceLayers {
-                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                image_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
-                image_extent,
-                ..Default::default()
-            }];
-            let buffer_image_copy_before_barrier = [ash::vk::ImageMemoryBarrier {
-                src_access_mask: ash::vk::AccessFlags::empty(),
-                dst_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-                old_layout: ash::vk::ImageLayout::PREINITIALIZED,
-                new_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                image: self.some_texture.0,
-                subresource_range: ash::vk::ImageSubresourceRange {
-                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            }];
-            let buffer_image_copy_after_barrier = [ash::vk::ImageMemoryBarrier {
-                src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-                dst_access_mask: ash::vk::AccessFlags::SHADER_READ,
-                old_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                new_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                image: self.some_texture.0,
-                subresource_range: ash::vk::ImageSubresourceRange {
-                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                ..Default::default()
-            }];
+            let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
+                smallvec::smallvec![];
+            for i in 0..FRAMES_IN_FLIGHT {
+                desc_writes.push(ash::vk::WriteDescriptorSet {
+                    dst_set: self.textured_quad_desc_sets[i as usize],
+                    dst_binding: 0,
+                    descriptor_count: 1,
+                    descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                    p_buffer_info: &desc_buffer_infos[i as usize],
+                    ..Default::default()
+                });
+                desc_writes.push(ash::vk::WriteDescriptorSet {
+                    dst_set: self.textured_quad_desc_sets[i as usize],
+                    dst_binding: 1,
+                    descriptor_count: 1,
+                    descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    p_image_info: &desc_image_info,
+                    ..Default::default()
+                });
+            }
             unsafe {
-                device.device.cmd_pipeline_barrier(
-                    *cb,
-                    ash::vk::PipelineStageFlags::TOP_OF_PIPE,
-                    ash::vk::PipelineStageFlags::TRANSFER,
-                    ash::vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &buffer_image_copy_before_barrier,
-                );
-                device.device.cmd_copy_buffer_to_image(
-                    *cb,
-                    image_staging_buf.0,
-                    self.some_texture.0,
-                    ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &buffer_image_copy,
-                );
-                device.device.cmd_pipeline_barrier(
-                    *cb,
-                    ash::vk::PipelineStageFlags::TRANSFER,
-                    ash::vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    ash::vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &buffer_image_copy_after_barrier,
-                );
+                device.device.update_descriptor_sets(&desc_writes, &[]);
             }
 
             self.ready = true;
@@ -2835,6 +3189,15 @@ impl Scene {
         let mvp = self.projection * self.triangle_view * triangle_model;
         allocator.update_host_visible_buffer(
             &self.triangle_ubufs[current_frame_slot as usize].1,
+            0,
+            64,
+            0,
+            &[(mvp.as_ptr() as *const u8, 0, 64)],
+        );
+
+        let mvp = self.projection * self.textured_quad_view;
+        allocator.update_host_visible_buffer(
+            &self.textured_quad_ubufs[current_frame_slot as usize].1,
             0,
             64,
             0,
@@ -2886,15 +3249,7 @@ impl Scene {
                 &pass_begin_info,
                 ash::vk::SubpassContents::INLINE,
             );
-            device.device.cmd_bind_pipeline(
-                *cb,
-                ash::vk::PipelineBindPoint::GRAPHICS,
-                self.color_material_pipeline
-                    .as_ref()
-                    .unwrap()
-                    .pipeline
-                    .pipeline,
-            );
+
             device.device.cmd_set_viewport(
                 *cb,
                 0,
@@ -2915,6 +3270,17 @@ impl Scene {
                     extent: self.output_pixel_size,
                 }],
             );
+
+            // triangle
+            device.device.cmd_bind_pipeline(
+                *cb,
+                ash::vk::PipelineBindPoint::GRAPHICS,
+                self.color_material_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .pipeline
+                    .pipeline,
+            );
             device.device.cmd_bind_descriptor_sets(
                 *cb,
                 ash::vk::PipelineBindPoint::GRAPHICS,
@@ -2933,6 +3299,42 @@ impl Scene {
             device
                 .device
                 .cmd_draw(*cb, TRIANGLE_VERTICES.len() as u32, 1, 0, 0);
+
+            // textured quad
+            device.device.cmd_bind_pipeline(
+                *cb,
+                ash::vk::PipelineBindPoint::GRAPHICS,
+                self.texture_material_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .pipeline
+                    .pipeline,
+            );
+            device.device.cmd_bind_descriptor_sets(
+                *cb,
+                ash::vk::PipelineBindPoint::GRAPHICS,
+                self.texture_material_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .pipeline_layout
+                    .layout,
+                0,
+                &[self.textured_quad_desc_sets[current_frame_slot as usize]],
+                &[],
+            );
+            device
+                .device
+                .cmd_bind_vertex_buffers(*cb, 0, &[self.quad_vbuf.0], &[0]);
+            device.device.cmd_bind_index_buffer(
+                *cb,
+                self.quad_ibuf.0,
+                0,
+                ash::vk::IndexType::UINT16,
+            );
+            device
+                .device
+                .cmd_draw_indexed(*cb, TEXTURED_QUAD_INDICES.len() as u32, 1, 0, 0, 0);
+
             device.device.cmd_end_render_pass(*cb);
         }
     }
@@ -3036,9 +3438,11 @@ impl App {
         self.command_pool.release_resources();
         self.pipeline_cache.release_resources();
         Rc::get_mut(&mut self.allocator)
-            .unwrap()
+            .expect("Some resources referencing the allocator have not been released")
             .release_resources();
-        Rc::get_mut(&mut self.device).unwrap().release_resources();
+        Rc::get_mut(&mut self.device)
+            .expect("Some resources referencing the device have not been released")
+            .release_resources();
         self.surface.release_resources();
         Rc::get_mut(&mut self.instance).unwrap().release_resources();
     }

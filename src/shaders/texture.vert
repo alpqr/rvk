@@ -7,7 +7,6 @@ layout(location = 0) out vec2 v_texcoord;
 
 layout(std140, binding = 0) uniform buf {
     mat4 mvp;
-    float opacity;
 };
 
 void main()
