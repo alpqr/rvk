@@ -161,7 +161,7 @@ impl WindowSurface {
         };
         WindowSurface {
             surface,
-            instance: Some(instance.clone()),
+            instance: Some(Rc::clone(instance)),
         }
     }
 
@@ -620,7 +620,7 @@ impl DepthStencilBuffer {
             image,
             memory,
             view,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -853,7 +853,7 @@ impl SwapchainBuilder {
             format: chosen_format.unwrap().format,
             flags: self.flags,
             pixel_size: image_extent,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         })
     }
 }
@@ -904,7 +904,7 @@ impl SwapchainImages {
         SwapchainImages {
             images,
             views,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1020,7 +1020,7 @@ impl SwapchainRenderPass {
         };
         SwapchainRenderPass {
             render_pass,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1080,7 +1080,7 @@ impl SwapchainFramebuffers {
         }
         SwapchainFramebuffers {
             framebuffers,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1131,7 +1131,7 @@ impl CommandPool {
         }
         CommandPool {
             pools,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1307,8 +1307,8 @@ impl SwapchainFrameState {
             current_frame_slot: 0,
             current_image_index: 0,
             frame_count: 0,
-            device: Some(device.clone()),
-            allocator: Some(allocator.clone()),
+            device: Some(Rc::clone(device)),
+            allocator: Some(Rc::clone(allocator)),
             deferred_release_queue: smallvec::smallvec![],
         }
     }
@@ -1648,7 +1648,7 @@ impl PipelineCache {
         };
         PipelineCache {
             cache,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1878,7 +1878,7 @@ impl DescriptorSetLayout {
         };
         DescriptorSetLayout {
             layout,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1924,7 +1924,7 @@ impl DescriptorPool {
         };
         DescriptorPool {
             pool,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -1994,7 +1994,7 @@ impl Shader {
         Shader {
             module,
             stage,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -2049,7 +2049,7 @@ impl PipelineLayout {
         };
         PipelineLayout {
             layout,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -2290,7 +2290,7 @@ impl<'a> GraphicsPipelineBuilder<'a> {
         } {
             Ok(pipelines) => Ok(GraphicsPipeline {
                 pipeline: pipelines[0],
-                device: Some(device.clone()),
+                device: Some(Rc::clone(device)),
             }),
             Err((_, r)) => Err(r),
         }
@@ -2312,7 +2312,7 @@ impl Sampler {
         };
         Sampler {
             sampler,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -2352,7 +2352,7 @@ impl ImageView {
         };
         ImageView {
             view,
-            device: Some(device.clone()),
+            device: Some(Rc::clone(device)),
         }
     }
 
@@ -2886,12 +2886,12 @@ struct Scene {
 
     triangle_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
     triangle_desc_sets: Vec<ash::vk::DescriptorSet>,
-    triangle_view: glm::Mat4,
+    triangle_view_matrix: glm::Mat4,
     triangle_rotation: f32,
 
     textured_quad_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
     textured_quad_desc_sets: Vec<ash::vk::DescriptorSet>,
-    textured_quad_view: glm::Mat4,
+    textured_quad_view_matrix: glm::Mat4,
 }
 
 impl Scene {
@@ -2900,8 +2900,8 @@ impl Scene {
         let null_image_and_alloc = (ash::vk::Image::null(), vk_mem::Allocation::null());
         Scene {
             ready: false,
-            device: Some(device.clone()),
-            allocator: Some(allocator.clone()),
+            device: Some(Rc::clone(device)),
+            allocator: Some(Rc::clone(allocator)),
             descriptor_pool: None,
             output_pixel_size: ash::vk::Extent2D {
                 width: 0,
@@ -2921,12 +2921,12 @@ impl Scene {
 
             triangle_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
             triangle_desc_sets: vec![],
-            triangle_view: glm::identity(),
+            triangle_view_matrix: glm::identity(),
             triangle_rotation: 0.0,
 
             textured_quad_ubufs: [null_buf_and_alloc; FRAMES_IN_FLIGHT as usize],
             textured_quad_desc_sets: vec![],
-            textured_quad_view: glm::identity(),
+            textured_quad_view_matrix: glm::identity(),
         }
     }
 
@@ -3060,7 +3060,8 @@ impl Scene {
                 },
             ));
 
-            self.triangle_view = glm::translate(&glm::identity(), &glm::vec3(0.0, 0.0, -4.0));
+            self.triangle_view_matrix =
+                glm::translate(&glm::identity(), &glm::vec3(0.0, 0.0, -4.0));
 
             for frame_slot in 0..FRAMES_IN_FLIGHT {
                 self.triangle_ubufs[frame_slot as usize] = allocator
@@ -3116,7 +3117,8 @@ impl Scene {
                 device.device.update_descriptor_sets(&desc_writes, &[]);
             }
 
-            self.textured_quad_view = glm::translate(&glm::identity(), &glm::vec3(-4.0, 0.0, -8.0));
+            self.textured_quad_view_matrix =
+                glm::translate(&glm::identity(), &glm::vec3(-4.0, 0.0, -8.0));
 
             for i in 0..FRAMES_IN_FLIGHT {
                 self.textured_quad_ubufs[i as usize] = allocator
@@ -3181,12 +3183,12 @@ impl Scene {
             self.ready = true;
         }
 
-        let triangle_model = glm::rotate(
+        let triangle_model_matrix = glm::rotate(
             &glm::identity(),
             self.triangle_rotation.to_radians(),
             &glm::vec3(0.0, 1.0, 0.0),
         );
-        let mvp = self.projection * self.triangle_view * triangle_model;
+        let mvp = self.projection * self.triangle_view_matrix * triangle_model_matrix;
         allocator.update_host_visible_buffer(
             &self.triangle_ubufs[current_frame_slot as usize].1,
             0,
@@ -3195,7 +3197,7 @@ impl Scene {
             &[(mvp.as_ptr() as *const u8, 0, 64)],
         );
 
-        let mvp = self.projection * self.textured_quad_view;
+        let mvp = self.projection * self.textured_quad_view_matrix;
         allocator.update_host_visible_buffer(
             &self.textured_quad_ubufs[current_frame_slot as usize].1,
             0,
@@ -3363,6 +3365,9 @@ pub struct App {
     depth_stencil_buffer: DepthStencilBuffer,
     allocator: Rc<MemAllocator>,
     pipeline_cache: PipelineCache,
+    imgui: imgui::Context,
+    imgui_winit: imgui_winit_support::WinitPlatform,
+    imgui_active: bool,
     scene: Scene,
 }
 
@@ -3403,6 +3408,14 @@ impl App {
         let swapchain_frame_state = SwapchainFrameState::new(&device, &allocator);
         let swapchain_resizer = SwapchainResizer::new();
         let pipeline_cache = PipelineCache::new(&device);
+        let mut imgui = imgui::Context::create();
+        imgui.set_ini_filename(None);
+        let mut imgui_winit = imgui_winit_support::WinitPlatform::init(&mut imgui);
+        imgui_winit.attach_window(
+            imgui.io_mut(),
+            &window,
+            imgui_winit_support::HiDpiMode::Default,
+        );
         let scene = Scene::new(&device, &allocator);
         App {
             window,
@@ -3421,6 +3434,9 @@ impl App {
             depth_stencil_buffer,
             allocator,
             pipeline_cache,
+            imgui,
+            imgui_winit,
+            imgui_active: true,
             scene,
         }
     }
@@ -3470,20 +3486,16 @@ impl App {
         event_loop.run(move |event, _, control_flow| {
             *control_flow = winit::event_loop::ControlFlow::Poll;
             match event {
-                winit::event::Event::WindowEvent { window_id, event }
-                    if window_id == self.window.id() =>
-                {
-                    match event {
-                        winit::event::WindowEvent::CloseRequested => {
-                            *control_flow = winit::event_loop::ControlFlow::Exit;
-                            running = false;
-                            self.release_resources();
-                        }
-                        _ => (),
-                    }
+                winit::event::Event::WindowEvent {
+                    window_id,
+                    event: winit::event::WindowEvent::CloseRequested,
+                } if window_id == self.window.id() => {
+                    *control_flow = winit::event_loop::ControlFlow::Exit;
+                    running = false;
+                    self.release_resources();
                 }
                 winit::event::Event::MainEventsCleared => {
-                    if self.scene.sync() {
+                    if self.scene.sync() || self.imgui_active {
                         self.window.request_redraw();
                     }
                 }
@@ -3517,6 +3529,11 @@ impl App {
                                     &mut self.swapchain_frame_state,
                                     &self.command_list,
                                 );
+                                if self.imgui_active {
+                                    let ui = self.imgui.frame();
+                                    let draw_data = ui.render();
+                                    // ###
+                                }
                                 self.swapchain_frame_state.end_frame(
                                     &self.swapchain,
                                     &self.swapchain_images,
@@ -3532,7 +3549,10 @@ impl App {
                         }
                     }
                 }
-                _ => (),
+                event => {
+                    self.imgui_winit
+                        .handle_event(self.imgui.io_mut(), &self.window, &event);
+                }
             };
         });
     }
