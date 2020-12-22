@@ -3436,6 +3436,7 @@ impl App {
         let pipeline_cache = PipelineCache::new(&device);
         let mut imgui = imgui::Context::create();
         imgui.set_ini_filename(None);
+        assert!(std::mem::size_of::<imgui::DrawIdx>() == 2);
         let mut imgui_winit = imgui_winit_support::WinitPlatform::init(&mut imgui);
         imgui_winit.attach_window(
             imgui.io_mut(),
@@ -3558,6 +3559,25 @@ impl App {
 
             let draw_data = ui.render();
             println!("{} {:?}", draw_data.total_vtx_count, draw_data.display_size);
+
+            let mut vbuf_offsets: smallvec::SmallVec<[u32; 64]> = smallvec::smallvec![];
+            let mut ibuf_offsets: smallvec::SmallVec<[u32; 64]> = smallvec::smallvec![];
+            let mut total_vbuf_size: u32 = 0;
+            let mut total_ibuf_size: u32 = 0;
+            for draw_list in draw_data.draw_lists() {
+                let vbuf_size = draw_list.vtx_buffer().len() * std::mem::size_of::<imgui::DrawVert>();
+                let ibuf_size = draw_list.idx_buffer().len() * std::mem::size_of::<imgui::DrawIdx>();
+                vbuf_offsets.push(total_vbuf_size);
+                total_vbuf_size += vbuf_size as u32;
+                ibuf_offsets.push(total_ibuf_size);
+                total_ibuf_size += ibuf_size as u32;
+
+                println!("  {} vertices", draw_list.vtx_buffer().len());
+                println!("  and {} indices", draw_list.idx_buffer().len());
+            }
+
+            //for (draw_list_buffers_index, draw_list) in draw_data.draw_lists().enumerate() {
+
             // ###
         }
     }
