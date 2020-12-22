@@ -533,6 +533,27 @@ fn memory_type_index_for_transient_image(
     return first_device_local_idx;
 }
 
+pub fn identity_component_mapping() -> ash::vk::ComponentMapping {
+    ash::vk::ComponentMapping {
+        r: ash::vk::ComponentSwizzle::IDENTITY,
+        g: ash::vk::ComponentSwizzle::IDENTITY,
+        b: ash::vk::ComponentSwizzle::IDENTITY,
+        a: ash::vk::ComponentSwizzle::IDENTITY,
+    }
+}
+
+pub fn base_level_subres_range(
+    aspect_mask: ash::vk::ImageAspectFlags,
+) -> ash::vk::ImageSubresourceRange {
+    ash::vk::ImageSubresourceRange {
+        aspect_mask,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    }
+}
+
 pub struct DepthStencilBuffer {
     image: ash::vk::Image,
     memory: ash::vk::DeviceMemory,
@@ -595,19 +616,10 @@ impl DepthStencilBuffer {
             image,
             view_type: ash::vk::ImageViewType::TYPE_2D,
             format,
-            components: ash::vk::ComponentMapping {
-                r: ash::vk::ComponentSwizzle::IDENTITY,
-                g: ash::vk::ComponentSwizzle::IDENTITY,
-                b: ash::vk::ComponentSwizzle::IDENTITY,
-                a: ash::vk::ComponentSwizzle::IDENTITY,
-            },
-            subresource_range: ash::vk::ImageSubresourceRange {
-                aspect_mask: ash::vk::ImageAspectFlags::DEPTH | ash::vk::ImageAspectFlags::STENCIL,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
+            components: identity_component_mapping(),
+            subresource_range: base_level_subres_range(
+                ash::vk::ImageAspectFlags::DEPTH | ash::vk::ImageAspectFlags::STENCIL,
+            ),
             ..Default::default()
         };
         let view = unsafe {
@@ -878,19 +890,8 @@ impl SwapchainImages {
                 image,
                 view_type: ash::vk::ImageViewType::TYPE_2D,
                 format: swapchain.format,
-                components: ash::vk::ComponentMapping {
-                    r: ash::vk::ComponentSwizzle::IDENTITY,
-                    g: ash::vk::ComponentSwizzle::IDENTITY,
-                    b: ash::vk::ComponentSwizzle::IDENTITY,
-                    a: ash::vk::ComponentSwizzle::IDENTITY,
-                },
-                subresource_range: ash::vk::ImageSubresourceRange {
-                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
+                components: identity_component_mapping(),
+                subresource_range: base_level_subres_range(ash::vk::ImageAspectFlags::COLOR),
                 ..Default::default()
             };
             let view = unsafe {
@@ -1484,13 +1485,7 @@ impl SwapchainFrameState {
             old_layout,
             new_layout,
             image: swapchain_images.images[self.current_image_index as usize],
-            subresource_range: ash::vk::ImageSubresourceRange {
-                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
+            subresource_range: base_level_subres_range(ash::vk::ImageAspectFlags::COLOR),
             ..Default::default()
         }];
         unsafe {
@@ -2377,6 +2372,196 @@ impl Drop for ImageView {
     }
 }
 
+pub fn buffer_copy_from_staging(
+    device: &Device,
+    cb: &ash::vk::CommandBuffer,
+    dst: &ash::vk::Buffer,
+    staging: &ash::vk::Buffer,
+    size: usize,
+) {
+    let copy_info = [ash::vk::BufferCopy {
+        size: size as u64,
+        ..Default::default()
+    }];
+    unsafe {
+        device
+            .device
+            .cmd_copy_buffer(*cb, *staging, *dst, &copy_info);
+    }
+}
+
+pub fn buffer_barrier(
+    device: &Device,
+    cb: &ash::vk::CommandBuffer,
+    buffer: &ash::vk::Buffer,
+    size: usize,
+    src_stage_mask: ash::vk::PipelineStageFlags,
+    src_access_mask: ash::vk::AccessFlags,
+    dst_stage_mask: ash::vk::PipelineStageFlags,
+    dst_access_mask: ash::vk::AccessFlags,
+) {
+    let barrier_info = [ash::vk::BufferMemoryBarrier {
+        src_access_mask,
+        dst_access_mask,
+        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
+        buffer: *buffer,
+        size: size as u64,
+        ..Default::default()
+    }];
+    unsafe {
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            src_stage_mask,
+            dst_stage_mask,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &barrier_info,
+            &[],
+        );
+    }
+}
+
+pub enum VertexIndexBufferType {
+    Vertex,
+    Index,
+}
+
+pub fn create_vertexindex_buffer_from_data(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+    data: *const u8,
+    size: usize,
+    typ: VertexIndexBufferType,
+) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let usage = match typ {
+        VertexIndexBufferType::Vertex => ash::vk::BufferUsageFlags::VERTEX_BUFFER,
+        VertexIndexBufferType::Index => ash::vk::BufferUsageFlags::INDEX_BUFFER,
+    };
+    let buf = allocator.create_device_local_buffer(size, usage).unwrap();
+    let staging_buf = allocator.create_staging_buffer(size).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&staging_buf);
+    allocator.update_host_visible_buffer(&staging_buf.1, 0, size, 0, &[(data, 0, size)]);
+    buffer_copy_from_staging(device, cb, &buf.0, &staging_buf.0, size);
+    let dst_access_mask = match typ {
+        VertexIndexBufferType::Vertex => ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+        VertexIndexBufferType::Index => ash::vk::AccessFlags::INDEX_READ,
+    };
+    buffer_barrier(
+        device,
+        cb,
+        &buf.0,
+        size,
+        ash::vk::PipelineStageFlags::TRANSFER,
+        ash::vk::AccessFlags::TRANSFER_WRITE,
+        ash::vk::PipelineStageFlags::VERTEX_INPUT,
+        dst_access_mask,
+    );
+    buf
+}
+
+pub fn create_base_rgba_2d_texture_for_sampling(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+    pixel_size: ash::vk::Extent2D,
+    pixels: &[u8],
+    sampled_in_stage_mask: ash::vk::PipelineStageFlags,
+) -> (ash::vk::Image, vk_mem::Allocation) {
+    let extent = ash::vk::Extent3D {
+        width: pixel_size.width,
+        height: pixel_size.height,
+        depth: 1,
+    };
+    let texture = allocator
+        .create_image(&ash::vk::ImageCreateInfo {
+            image_type: ash::vk::ImageType::TYPE_2D,
+            format: ash::vk::Format::R8G8B8A8_UNORM,
+            extent,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: ash::vk::SampleCountFlags::TYPE_1,
+            tiling: ash::vk::ImageTiling::OPTIMAL,
+            usage: ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_DST,
+            sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
+            initial_layout: ash::vk::ImageLayout::PREINITIALIZED,
+            ..Default::default()
+        })
+        .expect("Failed to create image object for 2D texture");
+    let image_staging_buf = allocator.create_staging_buffer(pixels.len()).unwrap();
+    swapchain_frame_state.deferred_release_buffer(&image_staging_buf);
+    allocator.update_host_visible_buffer(
+        &image_staging_buf.1,
+        0,
+        pixels.len(),
+        0,
+        &[(pixels.as_ptr() as *const u8, 0, pixels.len())],
+    );
+    let buffer_image_copy = [ash::vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: pixel_size.width,
+        buffer_image_height: pixel_size.height,
+        image_subresource: ash::vk::ImageSubresourceLayers {
+            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
+        image_extent: extent,
+        ..Default::default()
+    }];
+    let buffer_image_copy_before_barrier = [ash::vk::ImageMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::empty(),
+        dst_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        old_layout: ash::vk::ImageLayout::PREINITIALIZED,
+        new_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        image: texture.0,
+        subresource_range: base_level_subres_range(ash::vk::ImageAspectFlags::COLOR),
+        ..Default::default()
+    }];
+    let buffer_image_copy_after_barrier = [ash::vk::ImageMemoryBarrier {
+        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
+        dst_access_mask: ash::vk::AccessFlags::SHADER_READ,
+        old_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        new_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        image: texture.0,
+        subresource_range: base_level_subres_range(ash::vk::ImageAspectFlags::COLOR),
+        ..Default::default()
+    }];
+    unsafe {
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TOP_OF_PIPE,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &buffer_image_copy_before_barrier,
+        );
+        device.device.cmd_copy_buffer_to_image(
+            *cb,
+            image_staging_buf.0,
+            texture.0,
+            ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &buffer_image_copy,
+        );
+        device.device.cmd_pipeline_barrier(
+            *cb,
+            ash::vk::PipelineStageFlags::TRANSFER,
+            sampled_in_stage_mask,
+            ash::vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &buffer_image_copy_after_barrier,
+        );
+    }
+    texture
+}
+
 struct MaterialPipeline {
     desc_set_layout: DescriptorSetLayout,
     pipeline_layout: PipelineLayout,
@@ -2576,47 +2761,17 @@ fn create_triangle_vertex_buffer(
     swapchain_frame_state: &mut SwapchainFrameState,
     cb: &ash::vk::CommandBuffer,
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
-    let vbuf_len = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
-    let vbuf = allocator
-        .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
-        .unwrap();
-    let staging_buf = allocator.create_staging_buffer(vbuf_len).unwrap();
-    swapchain_frame_state.deferred_release_buffer(&staging_buf);
-    allocator.update_host_visible_buffer(
-        &staging_buf.1,
-        0,
-        vbuf_len,
-        0,
-        &[(TRIANGLE_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
-    );
-    let copy_info = [ash::vk::BufferCopy {
-        size: vbuf_len as u64,
-        ..Default::default()
-    }];
-    let barrier_info = [ash::vk::BufferMemoryBarrier {
-        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-        dst_access_mask: ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        buffer: vbuf.0,
-        size: vbuf_len as u64,
-        ..Default::default()
-    }];
-    unsafe {
-        device
-            .device
-            .cmd_copy_buffer(*cb, staging_buf.0, vbuf.0, &copy_info);
-        device.device.cmd_pipeline_barrier(
-            *cb,
-            ash::vk::PipelineStageFlags::TRANSFER,
-            ash::vk::PipelineStageFlags::VERTEX_INPUT,
-            ash::vk::DependencyFlags::empty(),
-            &[],
-            &barrier_info,
-            &[],
-        );
-    }
-    vbuf
+    let size = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
+    let data = TRIANGLE_VERTICES.as_ptr() as *const u8;
+    create_vertexindex_buffer_from_data(
+        device,
+        allocator,
+        swapchain_frame_state,
+        cb,
+        data,
+        size,
+        VertexIndexBufferType::Vertex,
+    )
 }
 
 #[repr(C)]
@@ -2653,47 +2808,17 @@ fn create_textured_quad_vertex_buffer(
     swapchain_frame_state: &mut SwapchainFrameState,
     cb: &ash::vk::CommandBuffer,
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
-    let vbuf_len = TEXTURED_QUAD_VERTICES.len() * std::mem::size_of::<TexturedQuadVertex>();
-    let vbuf = allocator
-        .create_device_local_buffer(vbuf_len, ash::vk::BufferUsageFlags::VERTEX_BUFFER)
-        .unwrap();
-    let staging_buf = allocator.create_staging_buffer(vbuf_len).unwrap();
-    swapchain_frame_state.deferred_release_buffer(&staging_buf);
-    allocator.update_host_visible_buffer(
-        &staging_buf.1,
-        0,
-        vbuf_len,
-        0,
-        &[(TEXTURED_QUAD_VERTICES.as_ptr() as *const u8, 0, vbuf_len)],
-    );
-    let copy_info = [ash::vk::BufferCopy {
-        size: vbuf_len as u64,
-        ..Default::default()
-    }];
-    let barrier_info = [ash::vk::BufferMemoryBarrier {
-        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-        dst_access_mask: ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        buffer: vbuf.0,
-        size: vbuf_len as u64,
-        ..Default::default()
-    }];
-    unsafe {
-        device
-            .device
-            .cmd_copy_buffer(*cb, staging_buf.0, vbuf.0, &copy_info);
-        device.device.cmd_pipeline_barrier(
-            *cb,
-            ash::vk::PipelineStageFlags::TRANSFER,
-            ash::vk::PipelineStageFlags::VERTEX_INPUT,
-            ash::vk::DependencyFlags::empty(),
-            &[],
-            &barrier_info,
-            &[],
-        );
-    }
-    vbuf
+    let size = TEXTURED_QUAD_VERTICES.len() * std::mem::size_of::<TexturedQuadVertex>();
+    let data = TEXTURED_QUAD_VERTICES.as_ptr() as *const u8;
+    create_vertexindex_buffer_from_data(
+        device,
+        allocator,
+        swapchain_frame_state,
+        cb,
+        data,
+        size,
+        VertexIndexBufferType::Vertex,
+    )
 }
 
 fn create_textured_quad_index_buffer(
@@ -2702,47 +2827,17 @@ fn create_textured_quad_index_buffer(
     swapchain_frame_state: &mut SwapchainFrameState,
     cb: &ash::vk::CommandBuffer,
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
-    let ibuf_len = TEXTURED_QUAD_INDICES.len() * std::mem::size_of::<u16>();
-    let ibuf = allocator
-        .create_device_local_buffer(ibuf_len, ash::vk::BufferUsageFlags::INDEX_BUFFER)
-        .unwrap();
-    let staging_buf = allocator.create_staging_buffer(ibuf_len).unwrap();
-    swapchain_frame_state.deferred_release_buffer(&staging_buf);
-    allocator.update_host_visible_buffer(
-        &staging_buf.1,
-        0,
-        ibuf_len,
-        0,
-        &[(TEXTURED_QUAD_INDICES.as_ptr() as *const u8, 0, ibuf_len)],
-    );
-    let copy_info = [ash::vk::BufferCopy {
-        size: ibuf_len as u64,
-        ..Default::default()
-    }];
-    let barrier_info = [ash::vk::BufferMemoryBarrier {
-        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-        dst_access_mask: ash::vk::AccessFlags::INDEX_READ,
-        src_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        dst_queue_family_index: ash::vk::QUEUE_FAMILY_IGNORED,
-        buffer: ibuf.0,
-        size: ibuf_len as u64,
-        ..Default::default()
-    }];
-    unsafe {
-        device
-            .device
-            .cmd_copy_buffer(*cb, staging_buf.0, ibuf.0, &copy_info);
-        device.device.cmd_pipeline_barrier(
-            *cb,
-            ash::vk::PipelineStageFlags::TRANSFER,
-            ash::vk::PipelineStageFlags::VERTEX_INPUT,
-            ash::vk::DependencyFlags::empty(),
-            &[],
-            &barrier_info,
-            &[],
-        );
-    }
-    ibuf
+    let size = TEXTURED_QUAD_INDICES.len() * std::mem::size_of::<u16>();
+    let data = TEXTURED_QUAD_INDICES.as_ptr() as *const u8;
+    create_vertexindex_buffer_from_data(
+        device,
+        allocator,
+        swapchain_frame_state,
+        cb,
+        data,
+        size,
+        VertexIndexBufferType::Index,
+    )
 }
 
 const IMAGE: &[u8] = std::include_bytes!("../data/something.png");
@@ -2764,106 +2859,18 @@ fn create_something_texture(
         _ => panic!("Unsupported image format"),
     };
     let pixels: &Vec<u8> = rgba8_image_data.as_raw();
-    let image_extent = ash::vk::Extent3D {
-        width: rgba8_image_data.width(),
-        height: rgba8_image_data.height(),
-        depth: 1,
-    };
-    let image_create_info = ash::vk::ImageCreateInfo {
-        image_type: ash::vk::ImageType::TYPE_2D,
-        format: ash::vk::Format::R8G8B8A8_UNORM,
-        extent: image_extent,
-        mip_levels: 1,
-        array_layers: 1,
-        samples: ash::vk::SampleCountFlags::TYPE_1,
-        tiling: ash::vk::ImageTiling::OPTIMAL,
-        usage: ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_DST,
-        sharing_mode: ash::vk::SharingMode::EXCLUSIVE,
-        initial_layout: ash::vk::ImageLayout::PREINITIALIZED,
-        ..Default::default()
-    };
-    let texture = allocator.create_image(&image_create_info).unwrap();
-    let image_staging_buf = allocator.create_staging_buffer(pixels.len()).unwrap();
-    swapchain_frame_state.deferred_release_buffer(&image_staging_buf);
-    allocator.update_host_visible_buffer(
-        &image_staging_buf.1,
-        0,
-        pixels.len(),
-        0,
-        &[(pixels.as_ptr() as *const u8, 0, pixels.len())],
-    );
-    let buffer_image_copy = [ash::vk::BufferImageCopy {
-        buffer_offset: 0,
-        buffer_row_length: image_extent.width,
-        buffer_image_height: image_extent.height,
-        image_subresource: ash::vk::ImageSubresourceLayers {
-            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
+    create_base_rgba_2d_texture_for_sampling(
+        device,
+        allocator,
+        swapchain_frame_state,
+        cb,
+        ash::vk::Extent2D {
+            width: rgba8_image_data.width(),
+            height: rgba8_image_data.height(),
         },
-        image_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
-        image_extent,
-        ..Default::default()
-    }];
-    let buffer_image_copy_before_barrier = [ash::vk::ImageMemoryBarrier {
-        src_access_mask: ash::vk::AccessFlags::empty(),
-        dst_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-        old_layout: ash::vk::ImageLayout::PREINITIALIZED,
-        new_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        image: texture.0,
-        subresource_range: ash::vk::ImageSubresourceRange {
-            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        ..Default::default()
-    }];
-    let buffer_image_copy_after_barrier = [ash::vk::ImageMemoryBarrier {
-        src_access_mask: ash::vk::AccessFlags::TRANSFER_WRITE,
-        dst_access_mask: ash::vk::AccessFlags::SHADER_READ,
-        old_layout: ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        new_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        image: texture.0,
-        subresource_range: ash::vk::ImageSubresourceRange {
-            aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        ..Default::default()
-    }];
-    unsafe {
-        device.device.cmd_pipeline_barrier(
-            *cb,
-            ash::vk::PipelineStageFlags::TOP_OF_PIPE,
-            ash::vk::PipelineStageFlags::TRANSFER,
-            ash::vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &buffer_image_copy_before_barrier,
-        );
-        device.device.cmd_copy_buffer_to_image(
-            *cb,
-            image_staging_buf.0,
-            texture.0,
-            ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &buffer_image_copy,
-        );
-        device.device.cmd_pipeline_barrier(
-            *cb,
-            ash::vk::PipelineStageFlags::TRANSFER,
-            ash::vk::PipelineStageFlags::FRAGMENT_SHADER,
-            ash::vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &buffer_image_copy_after_barrier,
-        );
-    }
-    texture
+        pixels,
+        ash::vk::PipelineStageFlags::FRAGMENT_SHADER,
+    )
 }
 
 struct Scene {
@@ -3031,19 +3038,8 @@ impl Scene {
                     image: self.some_texture.0,
                     view_type: ash::vk::ImageViewType::TYPE_2D,
                     format: ash::vk::Format::R8G8B8A8_UNORM,
-                    components: ash::vk::ComponentMapping {
-                        r: ash::vk::ComponentSwizzle::IDENTITY,
-                        g: ash::vk::ComponentSwizzle::IDENTITY,
-                        b: ash::vk::ComponentSwizzle::IDENTITY,
-                        a: ash::vk::ComponentSwizzle::IDENTITY,
-                    },
-                    subresource_range: ash::vk::ImageSubresourceRange {
-                        aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
+                    components: identity_component_mapping(),
+                    subresource_range: base_level_subres_range(ash::vk::ImageAspectFlags::COLOR),
                     ..Default::default()
                 },
             ));
@@ -3348,6 +3344,33 @@ impl Drop for Scene {
     }
 }
 
+pub fn prepare_imgui_font_texture(
+    device: &Device,
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    cb: &ash::vk::CommandBuffer,
+    imgui: &mut imgui::Context,
+    imgui_texture_list: &mut imgui::Textures<(ash::vk::Image, vk_mem::Allocation)>,
+) -> (ash::vk::Image, vk_mem::Allocation) {
+    let mut fonts = imgui.fonts();
+    let tex_data = fonts.build_rgba32_texture();
+    let texture = create_base_rgba_2d_texture_for_sampling(
+        device,
+        allocator,
+        swapchain_frame_state,
+        cb,
+        ash::vk::Extent2D {
+            width: tex_data.width,
+            height: tex_data.height,
+        },
+        tex_data.data,
+        ash::vk::PipelineStageFlags::FRAGMENT_SHADER,
+    );
+    fonts.tex_id = imgui_texture_list.insert(texture);
+    fonts.clear_tex_data();
+    texture
+}
+
 pub struct App {
     window: winit::window::Window,
     instance: Rc<Instance>,
@@ -3368,6 +3391,9 @@ pub struct App {
     imgui: imgui::Context,
     imgui_winit: imgui_winit_support::WinitPlatform,
     imgui_active: bool,
+    imgui_font_texture: (ash::vk::Image, vk_mem::Allocation),
+    imgui_texture_list: imgui::Textures<(ash::vk::Image, vk_mem::Allocation)>,
+    imgui_demo_open: bool,
     scene: Scene,
 }
 
@@ -3437,6 +3463,9 @@ impl App {
             imgui,
             imgui_winit,
             imgui_active: true,
+            imgui_font_texture: (ash::vk::Image::null(), vk_mem::Allocation::null()),
+            imgui_texture_list: imgui::Textures::new(),
+            imgui_demo_open: true,
             scene,
         }
     }
@@ -3444,6 +3473,7 @@ impl App {
     fn release_resources(&mut self) {
         // to be called on window close, the order matters, don't rely on Drop here
         self.device.wait_idle();
+        self.allocator.destroy_image(&self.imgui_font_texture);
         self.scene.release_resources();
         self.swapchain_frame_state.release_resources();
         self.swapchain_framebuffers.release_resources();
@@ -3478,6 +3508,58 @@ impl App {
             &mut self.swapchain_frame_state,
             &mut self.depth_stencil_buffer,
         );
+    }
+
+    fn record_frame(&mut self) {
+        self.scene.prepare(
+            &self.swapchain,
+            &self.swapchain_render_pass,
+            &mut self.swapchain_frame_state,
+            &self.command_list,
+            &self.pipeline_cache,
+        );
+        self.scene.render(
+            &self.swapchain,
+            &self.swapchain_framebuffers,
+            &self.swapchain_render_pass,
+            &mut self.swapchain_frame_state,
+            &self.command_list,
+        );
+        if self.imgui_active {
+            let cb = self
+                .swapchain_frame_state
+                .current_frame_command_buffer(&self.command_list);
+            if self.imgui_font_texture.0 == ash::vk::Image::null() {
+                self.imgui_font_texture = prepare_imgui_font_texture(
+                    &self.device,
+                    &self.allocator,
+                    &mut self.swapchain_frame_state,
+                    cb,
+                    &mut self.imgui,
+                    &mut self.imgui_texture_list,
+                );
+            }
+            let ui = self.imgui.frame();
+
+            let window = imgui::Window::new(imgui::im_str!("Hello world"));
+            window
+                .size([300.0, 100.0], imgui::Condition::FirstUseEver)
+                .build(&ui, || {
+                    ui.text(imgui::im_str!("Hello world!"));
+                    ui.separator();
+                    let mouse_pos = ui.io().mouse_pos;
+                    ui.text(imgui::im_str!(
+                        "Mouse Position: ({:.1},{:.1})",
+                        mouse_pos[0],
+                        mouse_pos[1]
+                    ));
+                });
+            ui.show_demo_window(&mut self.imgui_demo_open);
+
+            let draw_data = ui.render();
+            println!("{} {:?}", draw_data.total_vtx_count, draw_data.display_size);
+            // ###
+        }
     }
 
     pub fn run(mut self, event_loop: winit::event_loop::EventLoop<()>) {
@@ -3515,25 +3597,7 @@ impl App {
                                     current_frame_slot
                                 );
                                 frame_time = std::time::Instant::now();
-                                self.scene.prepare(
-                                    &self.swapchain,
-                                    &self.swapchain_render_pass,
-                                    &mut self.swapchain_frame_state,
-                                    &self.command_list,
-                                    &self.pipeline_cache,
-                                );
-                                self.scene.render(
-                                    &self.swapchain,
-                                    &self.swapchain_framebuffers,
-                                    &self.swapchain_render_pass,
-                                    &mut self.swapchain_frame_state,
-                                    &self.command_list,
-                                );
-                                if self.imgui_active {
-                                    let ui = self.imgui.frame();
-                                    let draw_data = ui.render();
-                                    // ###
-                                }
+                                self.record_frame();
                                 self.swapchain_frame_state.end_frame(
                                     &self.swapchain,
                                     &self.swapchain_images,
@@ -3550,6 +3614,22 @@ impl App {
                     }
                 }
                 event => {
+                    match event {
+                        winit::event::Event::WindowEvent {
+                            window_id,
+                            event: winit::event::WindowEvent::KeyboardInput { input, .. },
+                        } if window_id == self.window.id()
+                            && input.state == winit::event::ElementState::Pressed =>
+                        {
+                            match input.virtual_keycode {
+                                Some(winit::event::VirtualKeyCode::Grave) => {
+                                    self.imgui_active = !self.imgui_active
+                                }
+                                _ => (),
+                            }
+                        }
+                        _ => (),
+                    }
                     self.imgui_winit
                         .handle_event(self.imgui.io_mut(), &self.window, &event);
                 }
