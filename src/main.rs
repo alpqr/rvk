@@ -2751,6 +2751,101 @@ fn new_texture_material_pipeline(
     }
 }
 
+const IMGUI_MATERIAL_VS: &[u8] = std::include_bytes!("shaders/imgui.vert.spv");
+const IMGUI_MATERIAL_FS: &[u8] = std::include_bytes!("shaders/imgui.frag.spv");
+const IMGUI_MATERIAL_UBUF_SIZE: usize = 64;
+
+fn new_imgui_material_pipeline(
+    device: &Rc<Device>,
+    pipeline_cache: &PipelineCache,
+    render_pass: &ash::vk::RenderPass,
+) -> MaterialPipeline {
+    let desc_set_layout = DescriptorSetLayout::new(
+        device,
+        &[
+            ash::vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1,
+                stage_flags: ash::vk::ShaderStageFlags::VERTEX
+                    | ash::vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
+            ash::vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags: ash::vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            },
+        ],
+    );
+    let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
+
+    let vs = Shader::new(
+        device,
+        IMGUI_MATERIAL_VS,
+        ash::vk::ShaderStageFlags::VERTEX,
+    );
+    let fs = Shader::new(
+        device,
+        IMGUI_MATERIAL_FS,
+        ash::vk::ShaderStageFlags::FRAGMENT,
+    );
+
+    let vertex_bindings = [ash::vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: (4 * std::mem::size_of::<f32>() + 4 * std::mem::size_of::<u8>()) as u32,
+        ..Default::default()
+    }];
+    let vertex_attributes = [
+        ash::vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: ash::vk::Format::R32G32_SFLOAT,
+            offset: 0,
+        },
+        ash::vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: ash::vk::Format::R32G32_SFLOAT,
+            offset: 2 * std::mem::size_of::<f32>() as u32,
+        },
+        ash::vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: ash::vk::Format::R8G8B8A8_UNORM,
+            offset: 4 * std::mem::size_of::<f32>() as u32,
+        },
+    ];
+
+    let pipeline = GraphicsPipelineBuilder::new()
+        .with_shader_stages(&[&vs, &fs])
+        .with_layout(&pipeline_layout)
+        .with_render_pass(render_pass)
+        .with_vertex_input_layout(&vertex_bindings, &vertex_attributes)
+        .with_cull_mode(ash::vk::CullModeFlags::NONE)
+        .with_blend_state(ash::vk::PipelineColorBlendAttachmentState {
+            blend_enable: ash::vk::TRUE,
+            src_color_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_color_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            color_blend_op: ash::vk::BlendOp::ADD,
+            src_alpha_blend_factor: ash::vk::BlendFactor::SRC_ALPHA,
+            dst_alpha_blend_factor: ash::vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            alpha_blend_op: ash::vk::BlendOp::ADD,
+            color_write_mask: rgba_color_write_mask(),
+            ..Default::default()
+        })
+        .build(device, pipeline_cache)
+        .expect("Failed to build simple graphics pipeline");
+
+    MaterialPipeline {
+        desc_set_layout,
+        pipeline_layout,
+        pipeline,
+    }
+}
+
 #[repr(C)]
 struct TriangleVertex {
     pos: [f32; 3],
@@ -2907,6 +3002,7 @@ struct Scene {
 
     color_material_pipeline: Option<MaterialPipeline>,
     texture_material_pipeline: Option<MaterialPipeline>,
+    imgui_material_pipeline: Option<MaterialPipeline>,
 
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
     quad_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
@@ -2942,6 +3038,7 @@ impl Scene {
 
             color_material_pipeline: None,
             texture_material_pipeline: None,
+            imgui_material_pipeline: None,
 
             triangle_vbuf: null_buf_and_alloc,
             quad_vbuf: null_buf_and_alloc,
@@ -2968,6 +3065,7 @@ impl Scene {
         self.linear_sampler = None;
         self.color_material_pipeline = None;
         self.texture_material_pipeline = None;
+        self.imgui_material_pipeline = None;
         self.descriptor_pool = None;
 
         if self.allocator.is_some() {
@@ -3024,6 +3122,11 @@ impl Scene {
                 &swapchain_render_pass.render_pass,
             ));
             self.texture_material_pipeline = Some(new_texture_material_pipeline(
+                device,
+                pipeline_cache,
+                &swapchain_render_pass.render_pass,
+            ));
+            self.imgui_material_pipeline = Some(new_imgui_material_pipeline(
                 device,
                 pipeline_cache,
                 &swapchain_render_pass.render_pass,
