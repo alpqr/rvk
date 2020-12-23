@@ -1796,13 +1796,13 @@ impl MemAllocator {
         flush_range_offset: usize,
         flush_range_len: usize,
         base_offset: usize,
-        data: &[(*const u8, usize, usize)],
+        chunks: &[(*const u8, usize, usize)],
     ) {
         // map_memory should mostly be no-op due to creating as MAPPED
         match self.allocator.map_memory(allocation) {
             Ok(p) => {
                 unsafe {
-                    for (src, copy_offset, copy_len) in data {
+                    for (src, copy_offset, copy_len) in chunks {
                         p.add(base_offset + copy_offset)
                             .copy_from_nonoverlapping(*src, *copy_len);
                     }
@@ -2427,24 +2427,42 @@ pub enum VertexIndexBufferType {
     Index,
 }
 
-pub fn create_vertexindex_buffer_from_data(
+pub fn create_or_reuse_vertexindex_buffer_with_data(
     device: &Device,
     allocator: &MemAllocator,
     swapchain_frame_state: &mut SwapchainFrameState,
     cb: &ash::vk::CommandBuffer,
-    data: *const u8,
-    size: usize,
     typ: VertexIndexBufferType,
+    total_size: usize,
+    chunks: &[(*const u8, usize, usize)],
+    old_buffer: Option<(ash::vk::Buffer, vk_mem::Allocation, usize)>,
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let mut existing_buf_and_alloc: Option<(ash::vk::Buffer, vk_mem::Allocation)> = None;
+    match old_buffer {
+        Some((existing_buf, existing_alloc, existing_size)) => {
+            if existing_size < total_size {
+                swapchain_frame_state.deferred_release_buffer(&(existing_buf, existing_alloc));
+            } else if existing_buf != ash::vk::Buffer::null() {
+                existing_buf_and_alloc = Some((existing_buf, existing_alloc));
+            }
+        }
+        _ => (),
+    }
     let usage = match typ {
         VertexIndexBufferType::Vertex => ash::vk::BufferUsageFlags::VERTEX_BUFFER,
         VertexIndexBufferType::Index => ash::vk::BufferUsageFlags::INDEX_BUFFER,
     };
-    let buf = allocator.create_device_local_buffer(size, usage).unwrap();
-    let staging_buf = allocator.create_staging_buffer(size).unwrap();
+    let buf = if existing_buf_and_alloc.is_some() {
+        existing_buf_and_alloc.unwrap()
+    } else {
+        allocator
+            .create_device_local_buffer(total_size, usage)
+            .unwrap()
+    };
+    let staging_buf = allocator.create_staging_buffer(total_size).unwrap();
     swapchain_frame_state.deferred_release_buffer(&staging_buf);
-    allocator.update_host_visible_buffer(&staging_buf.1, 0, size, 0, &[(data, 0, size)]);
-    buffer_copy_from_staging(device, cb, &buf.0, &staging_buf.0, size);
+    allocator.update_host_visible_buffer(&staging_buf.1, 0, total_size, 0, chunks);
+    buffer_copy_from_staging(device, cb, &buf.0, &staging_buf.0, total_size);
     let dst_access_mask = match typ {
         VertexIndexBufferType::Vertex => ash::vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
         VertexIndexBufferType::Index => ash::vk::AccessFlags::INDEX_READ,
@@ -2453,7 +2471,7 @@ pub fn create_vertexindex_buffer_from_data(
         device,
         cb,
         &buf.0,
-        size,
+        total_size,
         ash::vk::PipelineStageFlags::TRANSFER,
         ash::vk::AccessFlags::TRANSFER_WRITE,
         ash::vk::PipelineStageFlags::VERTEX_INPUT,
@@ -2763,14 +2781,16 @@ fn create_triangle_vertex_buffer(
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
     let size = TRIANGLE_VERTICES.len() * std::mem::size_of::<TriangleVertex>();
     let data = TRIANGLE_VERTICES.as_ptr() as *const u8;
-    create_vertexindex_buffer_from_data(
+    let data_offset_size = [(data, 0, size)];
+    create_or_reuse_vertexindex_buffer_with_data(
         device,
         allocator,
         swapchain_frame_state,
         cb,
-        data,
-        size,
         VertexIndexBufferType::Vertex,
+        size,
+        &data_offset_size,
+        None,
     )
 }
 
@@ -2810,14 +2830,16 @@ fn create_textured_quad_vertex_buffer(
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
     let size = TEXTURED_QUAD_VERTICES.len() * std::mem::size_of::<TexturedQuadVertex>();
     let data = TEXTURED_QUAD_VERTICES.as_ptr() as *const u8;
-    create_vertexindex_buffer_from_data(
+    let data_offset_size = [(data, 0, size)];
+    create_or_reuse_vertexindex_buffer_with_data(
         device,
         allocator,
         swapchain_frame_state,
         cb,
-        data,
-        size,
         VertexIndexBufferType::Vertex,
+        size,
+        &data_offset_size,
+        None,
     )
 }
 
@@ -2829,14 +2851,16 @@ fn create_textured_quad_index_buffer(
 ) -> (ash::vk::Buffer, vk_mem::Allocation) {
     let size = TEXTURED_QUAD_INDICES.len() * std::mem::size_of::<u16>();
     let data = TEXTURED_QUAD_INDICES.as_ptr() as *const u8;
-    create_vertexindex_buffer_from_data(
+    let data_offset_size = [(data, 0, size)];
+    create_or_reuse_vertexindex_buffer_with_data(
         device,
         allocator,
         swapchain_frame_state,
         cb,
-        data,
-        size,
         VertexIndexBufferType::Index,
+        size,
+        &data_offset_size,
+        None,
     )
 }
 
@@ -3393,8 +3417,19 @@ pub struct App {
     imgui_active: bool,
     imgui_font_texture: (ash::vk::Image, vk_mem::Allocation),
     imgui_texture_list: imgui::Textures<(ash::vk::Image, vk_mem::Allocation)>,
+    imgui_vbuf: (ash::vk::Buffer, vk_mem::Allocation, usize),
+    imgui_ibuf: (ash::vk::Buffer, vk_mem::Allocation, usize),
     imgui_demo_open: bool,
     scene: Scene,
+}
+
+#[derive(Debug)]
+struct ImGuiDrawCommand {
+    texture_id: imgui::TextureId,
+    clip_rect: [f32; 4],
+    vertex_offset: usize,
+    index_offset: usize,
+    index_count: usize,
 }
 
 impl App {
@@ -3463,9 +3498,11 @@ impl App {
             pipeline_cache,
             imgui,
             imgui_winit,
-            imgui_active: true,
+            imgui_active: false,
             imgui_font_texture: (ash::vk::Image::null(), vk_mem::Allocation::null()),
             imgui_texture_list: imgui::Textures::new(),
+            imgui_vbuf: (ash::vk::Buffer::null(), vk_mem::Allocation::null(), 0),
+            imgui_ibuf: (ash::vk::Buffer::null(), vk_mem::Allocation::null(), 0),
             imgui_demo_open: true,
             scene,
         }
@@ -3475,6 +3512,10 @@ impl App {
         // to be called on window close, the order matters, don't rely on Drop here
         self.device.wait_idle();
         self.allocator.destroy_image(&self.imgui_font_texture);
+        self.allocator
+            .destroy_buffer(&(self.imgui_vbuf.0, self.imgui_vbuf.1));
+        self.allocator
+            .destroy_buffer(&(self.imgui_ibuf.0, self.imgui_ibuf.1));
         self.scene.release_resources();
         self.swapchain_frame_state.release_resources();
         self.swapchain_framebuffers.release_resources();
@@ -3519,13 +3560,9 @@ impl App {
             &self.command_list,
             &self.pipeline_cache,
         );
-        self.scene.render(
-            &self.swapchain,
-            &self.swapchain_framebuffers,
-            &self.swapchain_render_pass,
-            &mut self.swapchain_frame_state,
-            &self.command_list,
-        );
+
+        let mut imgui_draw_commands: smallvec::SmallVec<[ImGuiDrawCommand; 16]> =
+            smallvec::smallvec![];
         if self.imgui_active {
             let cb = self
                 .swapchain_frame_state
@@ -3542,6 +3579,7 @@ impl App {
             }
             let ui = self.imgui.frame();
 
+            // ###
             let window = imgui::Window::new(imgui::im_str!("Hello world"));
             window
                 .size([300.0, 100.0], imgui::Condition::FirstUseEver)
@@ -3558,26 +3596,91 @@ impl App {
             ui.show_demo_window(&mut self.imgui_demo_open);
 
             let draw_data = ui.render();
-            println!("{} {:?}", draw_data.total_vtx_count, draw_data.display_size);
 
-            let mut vbuf_offsets: smallvec::SmallVec<[u32; 64]> = smallvec::smallvec![];
-            let mut ibuf_offsets: smallvec::SmallVec<[u32; 64]> = smallvec::smallvec![];
-            let mut total_vbuf_size: u32 = 0;
-            let mut total_ibuf_size: u32 = 0;
+            imgui_draw_commands.clear();
+            let mut vbuf_chunks: smallvec::SmallVec<[(*const u8, usize, usize); 16]> =
+                smallvec::smallvec![];
+            let mut ibuf_chunks: smallvec::SmallVec<[(*const u8, usize, usize); 16]> =
+                smallvec::smallvec![];
+            let mut total_vbuf_size: usize = 0;
+            let mut total_ibuf_size: usize = 0;
+
             for draw_list in draw_data.draw_lists() {
-                let vbuf_size = draw_list.vtx_buffer().len() * std::mem::size_of::<imgui::DrawVert>();
-                let ibuf_size = draw_list.idx_buffer().len() * std::mem::size_of::<imgui::DrawIdx>();
-                vbuf_offsets.push(total_vbuf_size);
-                total_vbuf_size += vbuf_size as u32;
-                ibuf_offsets.push(total_ibuf_size);
-                total_ibuf_size += ibuf_size as u32;
+                let vbuf_size =
+                    draw_list.vtx_buffer().len() * std::mem::size_of::<imgui::DrawVert>();
+                let ibuf_size =
+                    draw_list.idx_buffer().len() * std::mem::size_of::<imgui::DrawIdx>();
+                vbuf_chunks.push((
+                    draw_list.vtx_buffer().as_ptr() as *const u8,
+                    total_vbuf_size,
+                    vbuf_size,
+                ));
+                total_vbuf_size += vbuf_size;
+                ibuf_chunks.push((
+                    draw_list.idx_buffer().as_ptr() as *const u8,
+                    total_ibuf_size,
+                    ibuf_size,
+                ));
+                total_ibuf_size += ibuf_size;
 
                 println!("  {} vertices", draw_list.vtx_buffer().len());
                 println!("  and {} indices", draw_list.idx_buffer().len());
+
+                for cmd in draw_list.commands() {
+                    match cmd {
+                        imgui::DrawCmd::Elements { count, cmd_params } => {
+                            imgui_draw_commands.push(ImGuiDrawCommand {
+                                texture_id: cmd_params.texture_id,
+                                clip_rect: cmd_params.clip_rect,
+                                vertex_offset: cmd_params.vtx_offset,
+                                index_offset: cmd_params.idx_offset,
+                                index_count: count,
+                            });
+                            println!("{:?}", imgui_draw_commands.last());
+                        }
+                        _ => (),
+                    }
+                }
             }
 
-            //for (draw_list_buffers_index, draw_list) in draw_data.draw_lists().enumerate() {
+            if total_vbuf_size > 0 {
+                let vbuf = create_or_reuse_vertexindex_buffer_with_data(
+                    &self.device,
+                    &self.allocator,
+                    &mut self.swapchain_frame_state,
+                    cb,
+                    VertexIndexBufferType::Vertex,
+                    total_vbuf_size,
+                    &vbuf_chunks,
+                    Some(self.imgui_vbuf),
+                );
+                self.imgui_vbuf = (vbuf.0, vbuf.1, total_vbuf_size);
+                let ibuf = create_or_reuse_vertexindex_buffer_with_data(
+                    &self.device,
+                    &self.allocator,
+                    &mut self.swapchain_frame_state,
+                    cb,
+                    VertexIndexBufferType::Index,
+                    total_ibuf_size,
+                    &ibuf_chunks,
+                    Some(self.imgui_ibuf),
+                );
+                self.imgui_ibuf = (ibuf.0, ibuf.1, total_ibuf_size);
+            }
+        }
 
+        self.scene.render(
+            &self.swapchain,
+            &self.swapchain_framebuffers,
+            &self.swapchain_render_pass,
+            &mut self.swapchain_frame_state,
+            &self.command_list,
+        );
+
+        if self.imgui_active {
+            let cb = self
+                .swapchain_frame_state
+                .current_frame_command_buffer(&self.command_list);
             // ###
         }
     }
