@@ -3521,11 +3521,16 @@ pub struct App {
     imgui: imgui::Context,
     imgui_winit: imgui_winit_support::WinitPlatform,
     imgui_active: bool,
+    imgui_descriptor_pool: Option<DescriptorPool>,
     imgui_material_pipeline: Option<MaterialPipeline>,
     imgui_font_texture: (ash::vk::Image, vk_mem::Allocation),
+    imgui_font_texture_view: Option<ImageView>,
+    imgui_sampler: Option<Sampler>,
     imgui_texture_list: imgui::Textures<(ash::vk::Image, vk_mem::Allocation)>,
     imgui_vbuf: (ash::vk::Buffer, vk_mem::Allocation, usize),
     imgui_ibuf: (ash::vk::Buffer, vk_mem::Allocation, usize),
+    imgui_ubufs: [(ash::vk::Buffer, vk_mem::Allocation); FRAMES_IN_FLIGHT as usize],
+    imgui_desc_sets: Vec<ash::vk::DescriptorSet>,
     imgui_demo_open: bool,
     scene: Scene,
 }
@@ -3606,11 +3611,17 @@ impl App {
             imgui,
             imgui_winit,
             imgui_active: false,
+            imgui_descriptor_pool: None,
             imgui_material_pipeline: None,
             imgui_font_texture: (ash::vk::Image::null(), vk_mem::Allocation::null()),
+            imgui_font_texture_view: None,
+            imgui_sampler: None,
             imgui_texture_list: imgui::Textures::new(),
             imgui_vbuf: (ash::vk::Buffer::null(), vk_mem::Allocation::null(), 0),
             imgui_ibuf: (ash::vk::Buffer::null(), vk_mem::Allocation::null(), 0),
+            imgui_ubufs: [(ash::vk::Buffer::null(), vk_mem::Allocation::null());
+                FRAMES_IN_FLIGHT as usize],
+            imgui_desc_sets: vec![],
             imgui_demo_open: true,
             scene,
         }
@@ -3619,12 +3630,18 @@ impl App {
     fn release_resources(&mut self) {
         // to be called on window close, the order matters, don't rely on Drop here
         self.device.wait_idle();
-        self.imgui_material_pipeline = None;
+        self.imgui_sampler = None;
+        self.imgui_font_texture_view = None;
         self.allocator.destroy_image(&self.imgui_font_texture);
+        self.imgui_material_pipeline = None;
+        self.imgui_descriptor_pool = None;
         self.allocator
             .destroy_buffer(&(self.imgui_vbuf.0, self.imgui_vbuf.1));
         self.allocator
             .destroy_buffer(&(self.imgui_ibuf.0, self.imgui_ibuf.1));
+        for buf_and_alloc in &self.imgui_ubufs {
+            self.allocator.destroy_buffer(buf_and_alloc);
+        }
         self.scene.release_resources();
         self.swapchain_frame_state.release_resources();
         self.swapchain_framebuffers.release_resources();
@@ -3670,12 +3687,13 @@ impl App {
             &self.pipeline_cache,
         );
 
+        let cb = self
+            .swapchain_frame_state
+            .current_frame_command_buffer(&self.command_list);
+        let current_frame_slot = self.swapchain_frame_state.current_frame_slot;
         let mut imgui_draw_commands: smallvec::SmallVec<[ImGuiDrawCommand; 16]> =
             smallvec::smallvec![];
         if self.imgui_active {
-            let cb = self
-                .swapchain_frame_state
-                .current_frame_command_buffer(&self.command_list);
             if self.imgui_material_pipeline.is_none() {
                 self.imgui_material_pipeline = Some(new_imgui_material_pipeline(
                     &self.device,
@@ -3692,6 +3710,34 @@ impl App {
                     &mut self.imgui,
                     &mut self.imgui_texture_list,
                 );
+            }
+            if self.imgui_font_texture_view.is_none() {
+                self.imgui_font_texture_view = Some(ImageView::new(
+                    &self.device,
+                    &ash::vk::ImageViewCreateInfo {
+                        image: self.imgui_font_texture.0,
+                        view_type: ash::vk::ImageViewType::TYPE_2D,
+                        format: ash::vk::Format::R8G8B8A8_UNORM,
+                        components: identity_component_mapping(),
+                        subresource_range: base_level_subres_range(
+                            ash::vk::ImageAspectFlags::COLOR,
+                        ),
+                        ..Default::default()
+                    },
+                ));
+            }
+            if self.imgui_sampler.is_none() {
+                self.imgui_sampler = Some(Sampler::new(
+                    &self.device,
+                    &ash::vk::SamplerCreateInfo {
+                        mag_filter: ash::vk::Filter::LINEAR,
+                        min_filter: ash::vk::Filter::LINEAR,
+                        address_mode_u: ash::vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        address_mode_v: ash::vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                        max_lod: 0.25,
+                        ..Default::default()
+                    },
+                ));
             }
             let ui = self.imgui.frame();
 
@@ -3784,6 +3830,104 @@ impl App {
                 );
                 self.imgui_ibuf = (ibuf.0, ibuf.1, total_ibuf_size);
             }
+
+            if self.imgui_ubufs[0].0 == ash::vk::Buffer::null() {
+                for frame_slot in 0..FRAMES_IN_FLIGHT {
+                    self.imgui_ubufs[frame_slot as usize] = self
+                        .allocator
+                        .create_host_visible_buffer(
+                            IMGUI_MATERIAL_UBUF_SIZE,
+                            ash::vk::BufferUsageFlags::UNIFORM_BUFFER,
+                        )
+                        .unwrap();
+                }
+            }
+
+            if self.imgui_descriptor_pool.is_none() {
+                self.imgui_descriptor_pool = Some(DescriptorPool::new(
+                    &self.device,
+                    FRAMES_IN_FLIGHT,
+                    &[
+                        ash::vk::DescriptorPoolSize {
+                            ty: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                            descriptor_count: FRAMES_IN_FLIGHT,
+                        },
+                        ash::vk::DescriptorPoolSize {
+                            ty: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            descriptor_count: FRAMES_IN_FLIGHT,
+                        },
+                    ],
+                ));
+            }
+
+            if self.imgui_desc_sets.len() == 0 {
+                self.imgui_desc_sets = self
+                    .imgui_descriptor_pool
+                    .as_ref()
+                    .unwrap()
+                    .allocate(
+                        &[&self
+                            .imgui_material_pipeline
+                            .as_ref()
+                            .unwrap()
+                            .desc_set_layout; FRAMES_IN_FLIGHT as usize],
+                    )
+                    .expect("Failed to allocate descriptor sets for ImGui content");
+                let mut desc_buffer_infos: smallvec::SmallVec<[ash::vk::DescriptorBufferInfo; 4]> =
+                    smallvec::smallvec![];
+                for i in 0..FRAMES_IN_FLIGHT {
+                    desc_buffer_infos.push(ash::vk::DescriptorBufferInfo {
+                        buffer: self.imgui_ubufs[i as usize].0,
+                        offset: 0,
+                        range: IMGUI_MATERIAL_UBUF_SIZE as u64,
+                    });
+                }
+                let desc_image_info = ash::vk::DescriptorImageInfo {
+                    sampler: self.imgui_sampler.as_ref().unwrap().sampler,
+                    image_view: self.imgui_font_texture_view.as_ref().unwrap().view,
+                    image_layout: ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    ..Default::default()
+                };
+                let mut desc_writes: smallvec::SmallVec<[ash::vk::WriteDescriptorSet; 4]> =
+                    smallvec::smallvec![];
+                for i in 0..FRAMES_IN_FLIGHT {
+                    desc_writes.push(ash::vk::WriteDescriptorSet {
+                        dst_set: self.imgui_desc_sets[i as usize],
+                        dst_binding: 0,
+                        descriptor_count: 1,
+                        descriptor_type: ash::vk::DescriptorType::UNIFORM_BUFFER,
+                        p_buffer_info: &desc_buffer_infos[i as usize],
+                        ..Default::default()
+                    });
+                    desc_writes.push(ash::vk::WriteDescriptorSet {
+                        dst_set: self.imgui_desc_sets[i as usize],
+                        dst_binding: 1,
+                        descriptor_count: 1,
+                        descriptor_type: ash::vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                        p_image_info: &desc_image_info,
+                        ..Default::default()
+                    });
+                }
+                unsafe {
+                    self.device.device.update_descriptor_sets(&desc_writes, &[]);
+                }
+            }
+
+            let mvp = glm::ortho_zo(
+                0.0f32,
+                draw_data.display_size[0],
+                0.0f32,
+                draw_data.display_size[1],
+                1.0f32,
+                -1.0f32,
+            );
+            self.allocator.update_host_visible_buffer(
+                &self.imgui_ubufs[current_frame_slot as usize].1,
+                0,
+                64,
+                0,
+                &[(mvp.as_ptr() as *const u8, 0, 64)],
+            );
         }
 
         self.scene.begin_main_render_pass(
@@ -3798,9 +3942,6 @@ impl App {
             .render(&self.swapchain_frame_state, &self.command_list);
 
         if self.imgui_active {
-            let cb = self
-                .swapchain_frame_state
-                .current_frame_command_buffer(&self.command_list);
             unsafe {
                 self.device.device.cmd_bind_pipeline(
                     *cb,
@@ -3810,6 +3951,18 @@ impl App {
                         .unwrap()
                         .pipeline
                         .pipeline,
+                );
+                self.device.device.cmd_bind_descriptor_sets(
+                    *cb,
+                    ash::vk::PipelineBindPoint::GRAPHICS,
+                    self.imgui_material_pipeline
+                        .as_ref()
+                        .unwrap()
+                        .pipeline_layout
+                        .layout,
+                    0,
+                    &[self.imgui_desc_sets[current_frame_slot as usize]],
+                    &[],
                 );
                 self.device
                     .device
