@@ -2480,6 +2480,40 @@ pub fn create_or_reuse_vertexindex_buffer_with_data(
     buf
 }
 
+pub fn create_or_reuse_host_visible_vertexindex_buffer_with_data(
+    allocator: &MemAllocator,
+    swapchain_frame_state: &mut SwapchainFrameState,
+    typ: VertexIndexBufferType,
+    total_size: usize,
+    chunks: &[(*const u8, usize, usize)],
+    old_buffer: Option<(ash::vk::Buffer, vk_mem::Allocation, usize)>,
+) -> (ash::vk::Buffer, vk_mem::Allocation) {
+    let mut existing_buf_and_alloc: Option<(ash::vk::Buffer, vk_mem::Allocation)> = None;
+    match old_buffer {
+        Some((existing_buf, existing_alloc, existing_size)) => {
+            if existing_size < total_size {
+                swapchain_frame_state.deferred_release_buffer(&(existing_buf, existing_alloc));
+            } else if existing_buf != ash::vk::Buffer::null() {
+                existing_buf_and_alloc = Some((existing_buf, existing_alloc));
+            }
+        }
+        _ => (),
+    }
+    let usage = match typ {
+        VertexIndexBufferType::Vertex => ash::vk::BufferUsageFlags::VERTEX_BUFFER,
+        VertexIndexBufferType::Index => ash::vk::BufferUsageFlags::INDEX_BUFFER,
+    };
+    let buf = if existing_buf_and_alloc.is_some() {
+        existing_buf_and_alloc.unwrap()
+    } else {
+        allocator
+            .create_host_visible_buffer(total_size, usage)
+            .unwrap()
+    };
+    allocator.update_host_visible_buffer(&buf.1, 0, total_size, 0, chunks);
+    buf
+}
+
 pub fn create_base_rgba_2d_texture_for_sampling(
     device: &Device,
     allocator: &MemAllocator,
@@ -3538,7 +3572,8 @@ pub struct App {
 #[derive(Debug)]
 struct ImGuiDrawCommand {
     texture_id: imgui::TextureId,
-    clip_rect: [f32; 4],
+    scissor_offset: ash::vk::Offset2D,
+    scissor_extent: ash::vk::Extent2D,
     base_vertex: i32,
     first_index: u32,
     index_count: u32,
@@ -3691,6 +3726,7 @@ impl App {
             .swapchain_frame_state
             .current_frame_command_buffer(&self.command_list);
         let current_frame_slot = self.swapchain_frame_state.current_frame_slot;
+        let imgui_scale_factor: [f32; 2];
         let mut imgui_draw_commands: smallvec::SmallVec<[ImGuiDrawCommand; 16]> =
             smallvec::smallvec![];
         if self.imgui_active {
@@ -3742,22 +3778,11 @@ impl App {
             let ui = self.imgui.frame();
 
             // ###
-            let window = imgui::Window::new(imgui::im_str!("Hello world"));
-            window
-                .size([300.0, 100.0], imgui::Condition::FirstUseEver)
-                .build(&ui, || {
-                    ui.text(imgui::im_str!("Hello world!"));
-                    ui.separator();
-                    let mouse_pos = ui.io().mouse_pos;
-                    ui.text(imgui::im_str!(
-                        "Mouse Position: ({:.1},{:.1})",
-                        mouse_pos[0],
-                        mouse_pos[1]
-                    ));
-                });
             ui.show_demo_window(&mut self.imgui_demo_open);
 
+            self.imgui_winit.prepare_render(&ui, &self.window);
             let draw_data = ui.render();
+            imgui_scale_factor = draw_data.framebuffer_scale;
 
             imgui_draw_commands.clear();
             let mut vbuf_chunks: smallvec::SmallVec<[(*const u8, usize, usize); 16]> =
@@ -3788,9 +3813,28 @@ impl App {
                 for cmd in draw_list.commands() {
                     match cmd {
                         imgui::DrawCmd::Elements { count, cmd_params } => {
+                            let scissor_offset = ash::vk::Offset2D {
+                                x: std::cmp::max(
+                                    0,
+                                    (cmd_params.clip_rect[0] * imgui_scale_factor[0]) as i32,
+                                ),
+                                y: std::cmp::max(
+                                    0,
+                                    (cmd_params.clip_rect[1] * imgui_scale_factor[1]) as i32,
+                                ),
+                            };
+                            let scissor_extent = ash::vk::Extent2D {
+                                width: ((cmd_params.clip_rect[2] - cmd_params.clip_rect[0])
+                                    * imgui_scale_factor[0])
+                                    as u32,
+                                height: ((cmd_params.clip_rect[3] - cmd_params.clip_rect[1])
+                                    * imgui_scale_factor[1])
+                                    as u32,
+                            };
                             imgui_draw_commands.push(ImGuiDrawCommand {
                                 texture_id: cmd_params.texture_id,
-                                clip_rect: cmd_params.clip_rect,
+                                scissor_offset,
+                                scissor_extent,
                                 base_vertex: (cmd_params.vtx_offset + global_base_vertex) as i32,
                                 first_index: (cmd_params.idx_offset + global_first_index) as u32,
                                 index_count: count as u32,
@@ -3807,22 +3851,18 @@ impl App {
             }
 
             if total_vbuf_size > 0 {
-                let vbuf = create_or_reuse_vertexindex_buffer_with_data(
-                    &self.device,
+                let vbuf = create_or_reuse_host_visible_vertexindex_buffer_with_data(
                     &self.allocator,
                     &mut self.swapchain_frame_state,
-                    cb,
                     VertexIndexBufferType::Vertex,
                     total_vbuf_size,
                     &vbuf_chunks,
                     Some(self.imgui_vbuf),
                 );
                 self.imgui_vbuf = (vbuf.0, vbuf.1, total_vbuf_size);
-                let ibuf = create_or_reuse_vertexindex_buffer_with_data(
-                    &self.device,
+                let ibuf = create_or_reuse_host_visible_vertexindex_buffer_with_data(
                     &self.allocator,
                     &mut self.swapchain_frame_state,
-                    cb,
                     VertexIndexBufferType::Index,
                     total_ibuf_size,
                     &ibuf_chunks,
@@ -3973,7 +4013,16 @@ impl App {
                     0,
                     ash::vk::IndexType::UINT16,
                 );
+                let mut last_scissor: Option<ash::vk::Rect2D> = None;
                 for cmd in imgui_draw_commands {
+                    let scissor = ash::vk::Rect2D {
+                        offset: cmd.scissor_offset,
+                        extent: cmd.scissor_extent,
+                    };
+                    if last_scissor.is_none() || last_scissor.unwrap() != scissor {
+                        self.device.device.cmd_set_scissor(*cb, 0, &[scissor]);
+                        last_scissor = Some(scissor);
+                    }
                     self.device.device.cmd_draw_indexed(
                         *cb,
                         cmd.index_count,
@@ -4005,6 +4054,11 @@ impl App {
                     self.release_resources();
                 }
                 winit::event::Event::MainEventsCleared => {
+                    if self.imgui_active {
+                        self.imgui_winit
+                            .prepare_frame(self.imgui.io_mut(), &self.window)
+                            .unwrap();
+                    }
                     if self.scene.sync() || self.imgui_active {
                         self.window.request_redraw();
                     }
@@ -4042,6 +4096,8 @@ impl App {
                     }
                 }
                 event => {
+                    let mut active_just_changed = false;
+                    let mut forward_always = false;
                     match event {
                         winit::event::Event::WindowEvent {
                             window_id,
@@ -4051,15 +4107,24 @@ impl App {
                         {
                             match input.virtual_keycode {
                                 Some(winit::event::VirtualKeyCode::Grave) => {
-                                    self.imgui_active = !self.imgui_active
+                                    self.imgui_active = !self.imgui_active;
+                                    active_just_changed = true;
                                 }
                                 _ => (),
                             }
                         }
+                        winit::event::Event::WindowEvent {
+                            window_id,
+                            event: winit::event::WindowEvent::Resized(_),
+                        } if window_id == self.window.id() => {
+                            forward_always = true;
+                        }
                         _ => (),
                     }
-                    self.imgui_winit
-                        .handle_event(self.imgui.io_mut(), &self.window, &event);
+                    if (self.imgui_active && !active_just_changed) || forward_always {
+                        self.imgui_winit
+                            .handle_event(self.imgui.io_mut(), &self.window, &event);
+                    }
                 }
             };
         });
