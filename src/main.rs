@@ -2782,11 +2782,7 @@ fn new_imgui_material_pipeline(
     );
     let pipeline_layout = PipelineLayout::new(device, &[&desc_set_layout], &[]);
 
-    let vs = Shader::new(
-        device,
-        IMGUI_MATERIAL_VS,
-        ash::vk::ShaderStageFlags::VERTEX,
-    );
+    let vs = Shader::new(device, IMGUI_MATERIAL_VS, ash::vk::ShaderStageFlags::VERTEX);
     let fs = Shader::new(
         device,
         IMGUI_MATERIAL_FS,
@@ -3002,7 +2998,6 @@ struct Scene {
 
     color_material_pipeline: Option<MaterialPipeline>,
     texture_material_pipeline: Option<MaterialPipeline>,
-    imgui_material_pipeline: Option<MaterialPipeline>,
 
     triangle_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
     quad_vbuf: (ash::vk::Buffer, vk_mem::Allocation),
@@ -3038,7 +3033,6 @@ impl Scene {
 
             color_material_pipeline: None,
             texture_material_pipeline: None,
-            imgui_material_pipeline: None,
 
             triangle_vbuf: null_buf_and_alloc,
             quad_vbuf: null_buf_and_alloc,
@@ -3065,7 +3059,6 @@ impl Scene {
         self.linear_sampler = None;
         self.color_material_pipeline = None;
         self.texture_material_pipeline = None;
-        self.imgui_material_pipeline = None;
         self.descriptor_pool = None;
 
         if self.allocator.is_some() {
@@ -3122,11 +3115,6 @@ impl Scene {
                 &swapchain_render_pass.render_pass,
             ));
             self.texture_material_pipeline = Some(new_texture_material_pipeline(
-                device,
-                pipeline_cache,
-                &swapchain_render_pass.render_pass,
-            ));
-            self.imgui_material_pipeline = Some(new_imgui_material_pipeline(
                 device,
                 pipeline_cache,
                 &swapchain_render_pass.render_pass,
@@ -3330,19 +3318,14 @@ impl Scene {
         );
     }
 
-    pub fn render(
-        &mut self,
+    pub fn begin_main_render_pass(
+        &self,
         swapchain: &Swapchain,
         swapchain_framebuffers: &SwapchainFramebuffers,
         swapchain_render_pass: &SwapchainRenderPass,
-        swapchain_frame_state: &mut SwapchainFrameState,
+        swapchain_frame_state: &SwapchainFrameState,
         command_list: &CommandList,
     ) {
-        let device = self.device.as_ref().unwrap();
-        let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
-        let current_frame_slot = swapchain_frame_state.current_frame_slot;
-        let current_image_index = swapchain_frame_state.current_image_index;
-
         let clear_values = [
             ash::vk::ClearValue {
                 color: ash::vk::ClearColorValue {
@@ -3358,7 +3341,8 @@ impl Scene {
         ];
         let pass_begin_info = ash::vk::RenderPassBeginInfo {
             render_pass: swapchain_render_pass.render_pass,
-            framebuffer: swapchain_framebuffers.framebuffers[current_image_index as usize],
+            framebuffer: swapchain_framebuffers.framebuffers
+                [swapchain_frame_state.current_image_index as usize],
             render_area: ash::vk::Rect2D {
                 offset: ash::vk::Offset2D { x: 0, y: 0 },
                 extent: swapchain.pixel_size,
@@ -3367,14 +3351,35 @@ impl Scene {
             p_clear_values: clear_values.as_ptr(),
             ..Default::default()
         };
-
+        let device = self.device.as_ref().unwrap();
+        let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
         unsafe {
             device.device.cmd_begin_render_pass(
                 *cb,
                 &pass_begin_info,
                 ash::vk::SubpassContents::INLINE,
             );
+        }
+    }
 
+    pub fn end_main_render_pass(
+        &self,
+        swapchain_frame_state: &SwapchainFrameState,
+        command_list: &CommandList,
+    ) {
+        let device = self.device.as_ref().unwrap();
+        let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
+        unsafe {
+            device.device.cmd_end_render_pass(*cb);
+        }
+    }
+
+    pub fn render(&self, swapchain_frame_state: &SwapchainFrameState, command_list: &CommandList) {
+        let device = self.device.as_ref().unwrap();
+        let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
+        let current_frame_slot = swapchain_frame_state.current_frame_slot;
+
+        unsafe {
             device.device.cmd_set_viewport(
                 *cb,
                 0,
@@ -3459,8 +3464,6 @@ impl Scene {
             device
                 .device
                 .cmd_draw_indexed(*cb, TEXTURED_QUAD_INDICES.len() as u32, 1, 0, 0, 0);
-
-            device.device.cmd_end_render_pass(*cb);
         }
     }
 }
@@ -3518,6 +3521,7 @@ pub struct App {
     imgui: imgui::Context,
     imgui_winit: imgui_winit_support::WinitPlatform,
     imgui_active: bool,
+    imgui_material_pipeline: Option<MaterialPipeline>,
     imgui_font_texture: (ash::vk::Image, vk_mem::Allocation),
     imgui_texture_list: imgui::Textures<(ash::vk::Image, vk_mem::Allocation)>,
     imgui_vbuf: (ash::vk::Buffer, vk_mem::Allocation, usize),
@@ -3530,9 +3534,9 @@ pub struct App {
 struct ImGuiDrawCommand {
     texture_id: imgui::TextureId,
     clip_rect: [f32; 4],
-    vertex_offset: usize,
-    index_offset: usize,
-    index_count: usize,
+    base_vertex: i32,
+    first_index: u32,
+    index_count: u32,
 }
 
 impl App {
@@ -3602,6 +3606,7 @@ impl App {
             imgui,
             imgui_winit,
             imgui_active: false,
+            imgui_material_pipeline: None,
             imgui_font_texture: (ash::vk::Image::null(), vk_mem::Allocation::null()),
             imgui_texture_list: imgui::Textures::new(),
             imgui_vbuf: (ash::vk::Buffer::null(), vk_mem::Allocation::null(), 0),
@@ -3614,6 +3619,7 @@ impl App {
     fn release_resources(&mut self) {
         // to be called on window close, the order matters, don't rely on Drop here
         self.device.wait_idle();
+        self.imgui_material_pipeline = None;
         self.allocator.destroy_image(&self.imgui_font_texture);
         self.allocator
             .destroy_buffer(&(self.imgui_vbuf.0, self.imgui_vbuf.1));
@@ -3670,6 +3676,13 @@ impl App {
             let cb = self
                 .swapchain_frame_state
                 .current_frame_command_buffer(&self.command_list);
+            if self.imgui_material_pipeline.is_none() {
+                self.imgui_material_pipeline = Some(new_imgui_material_pipeline(
+                    &self.device,
+                    &self.pipeline_cache,
+                    &self.swapchain_render_pass.render_pass,
+                ));
+            }
             if self.imgui_font_texture.0 == ash::vk::Image::null() {
                 self.imgui_font_texture = prepare_imgui_font_texture(
                     &self.device,
@@ -3707,27 +3720,24 @@ impl App {
                 smallvec::smallvec![];
             let mut total_vbuf_size: usize = 0;
             let mut total_ibuf_size: usize = 0;
+            let mut global_base_vertex: usize = 0;
+            let mut global_first_index: usize = 0;
 
             for draw_list in draw_data.draw_lists() {
-                let vbuf_size =
-                    draw_list.vtx_buffer().len() * std::mem::size_of::<imgui::DrawVert>();
-                let ibuf_size =
-                    draw_list.idx_buffer().len() * std::mem::size_of::<imgui::DrawIdx>();
+                let vertex_count = draw_list.vtx_buffer().len();
+                let vbuf_size = vertex_count * std::mem::size_of::<imgui::DrawVert>();
+                let index_count = draw_list.idx_buffer().len();
+                let ibuf_size = index_count * std::mem::size_of::<imgui::DrawIdx>();
                 vbuf_chunks.push((
                     draw_list.vtx_buffer().as_ptr() as *const u8,
                     total_vbuf_size,
                     vbuf_size,
                 ));
-                total_vbuf_size += vbuf_size;
                 ibuf_chunks.push((
                     draw_list.idx_buffer().as_ptr() as *const u8,
                     total_ibuf_size,
                     ibuf_size,
                 ));
-                total_ibuf_size += ibuf_size;
-
-                println!("  {} vertices", draw_list.vtx_buffer().len());
-                println!("  and {} indices", draw_list.idx_buffer().len());
 
                 for cmd in draw_list.commands() {
                     match cmd {
@@ -3735,15 +3745,19 @@ impl App {
                             imgui_draw_commands.push(ImGuiDrawCommand {
                                 texture_id: cmd_params.texture_id,
                                 clip_rect: cmd_params.clip_rect,
-                                vertex_offset: cmd_params.vtx_offset,
-                                index_offset: cmd_params.idx_offset,
-                                index_count: count,
+                                base_vertex: (cmd_params.vtx_offset + global_base_vertex) as i32,
+                                first_index: (cmd_params.idx_offset + global_first_index) as u32,
+                                index_count: count as u32,
                             });
-                            println!("{:?}", imgui_draw_commands.last());
                         }
                         _ => (),
                     }
                 }
+
+                total_vbuf_size += vbuf_size;
+                total_ibuf_size += ibuf_size;
+                global_base_vertex += vertex_count;
+                global_first_index += index_count;
             }
 
             if total_vbuf_size > 0 {
@@ -3772,20 +3786,55 @@ impl App {
             }
         }
 
-        self.scene.render(
+        self.scene.begin_main_render_pass(
             &self.swapchain,
             &self.swapchain_framebuffers,
             &self.swapchain_render_pass,
-            &mut self.swapchain_frame_state,
+            &self.swapchain_frame_state,
             &self.command_list,
         );
+
+        self.scene
+            .render(&self.swapchain_frame_state, &self.command_list);
 
         if self.imgui_active {
             let cb = self
                 .swapchain_frame_state
                 .current_frame_command_buffer(&self.command_list);
-            // ###
+            unsafe {
+                self.device.device.cmd_bind_pipeline(
+                    *cb,
+                    ash::vk::PipelineBindPoint::GRAPHICS,
+                    self.imgui_material_pipeline
+                        .as_ref()
+                        .unwrap()
+                        .pipeline
+                        .pipeline,
+                );
+                self.device
+                    .device
+                    .cmd_bind_vertex_buffers(*cb, 0, &[self.imgui_vbuf.0], &[0]);
+                self.device.device.cmd_bind_index_buffer(
+                    *cb,
+                    self.imgui_ibuf.0,
+                    0,
+                    ash::vk::IndexType::UINT16,
+                );
+                for cmd in imgui_draw_commands {
+                    self.device.device.cmd_draw_indexed(
+                        *cb,
+                        cmd.index_count,
+                        1,
+                        cmd.first_index,
+                        cmd.base_vertex,
+                        0,
+                    );
+                }
+            }
         }
+
+        self.scene
+            .end_main_render_pass(&self.swapchain_frame_state, &self.command_list);
     }
 
     pub fn run(mut self, event_loop: winit::event_loop::EventLoop<()>) {
