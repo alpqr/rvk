@@ -1,8 +1,9 @@
+use crate::fw::*;
+use crate::scene::MaterialPipeline;
+use crate::uicontent::UiContent;
 use ash::version::DeviceV1_0;
 use nalgebra_glm as glm;
 use std::rc::Rc;
-use crate::fw::*;
-use crate::scene::MaterialPipeline;
 
 const IMGUI_MATERIAL_VS: &[u8] = std::include_bytes!("shaders/imgui.vert.spv");
 const IMGUI_MATERIAL_FS: &[u8] = std::include_bytes!("shaders/imgui.frag.spv");
@@ -151,7 +152,7 @@ pub struct ImGui {
     draw_commands: smallvec::SmallVec<[ImGuiDrawCommand; 16]>,
     last_display_size: [f32; 2],
     projection: glm::Mat4,
-    demo_open: bool,
+    ui_content: UiContent,
 }
 
 impl ImGui {
@@ -189,7 +190,7 @@ impl ImGui {
             draw_commands: smallvec::smallvec![],
             last_display_size: [0.0, 0.0],
             projection: glm::identity(),
-            demo_open: true,
+            ui_content: UiContent::new(),
         }
     }
 
@@ -272,16 +273,14 @@ impl ImGui {
                 },
             ));
         }
+
         let ui = self.ctx.frame();
-
-        // ###
-        ui.show_demo_window(&mut self.demo_open);
-
+        self.ui_content.update(&ui);
         self.winit_support.prepare_render(&ui, window);
         let draw_data = ui.render();
         scale_factor = draw_data.framebuffer_scale;
-
         self.draw_commands.clear();
+
         let mut vbuf_chunks: smallvec::SmallVec<[(*const u8, usize, usize); 16]> =
             smallvec::smallvec![];
         let mut ibuf_chunks: smallvec::SmallVec<[(*const u8, usize, usize); 16]> =

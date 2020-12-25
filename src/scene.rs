@@ -1,7 +1,7 @@
+use crate::fw::*;
 use ash::version::DeviceV1_0;
 use nalgebra_glm as glm;
 use std::rc::Rc;
-use crate::fw::*;
 
 pub struct MaterialPipeline {
     pub desc_set_layout: DescriptorSetLayout,
@@ -706,7 +706,11 @@ impl Scene {
         }
     }
 
-    pub fn render(&self, swapchain_frame_state: &SwapchainFrameState, command_list: &CommandList) {
+    pub fn render_main_pass(
+        &self,
+        swapchain_frame_state: &SwapchainFrameState,
+        command_list: &CommandList,
+    ) {
         let device = self.device.as_ref().unwrap();
         let cb = swapchain_frame_state.current_frame_command_buffer(command_list);
         let current_frame_slot = swapchain_frame_state.current_frame_slot;

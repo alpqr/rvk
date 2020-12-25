@@ -1,7 +1,7 @@
-use std::rc::Rc;
 use crate::fw::*;
-use crate::ui::ImGui;
 use crate::scene::Scene;
+use crate::ui::ImGui;
+use std::rc::Rc;
 
 pub struct App {
     window: winit::window::Window,
@@ -151,7 +151,7 @@ impl App {
         );
 
         self.scene
-            .render(&self.swapchain_frame_state, &self.command_list);
+            .render_main_pass(&self.swapchain_frame_state, &self.command_list);
 
         self.imgui
             .render(&self.swapchain_frame_state, &self.command_list);

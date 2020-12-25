@@ -1,7 +1,8 @@
-mod fw;
-mod ui;
-mod scene;
 mod app;
+mod fw;
+mod scene;
+mod ui;
+mod uicontent;
 
 use app::*;
 
