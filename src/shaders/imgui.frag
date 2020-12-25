@@ -1,4 +1,7 @@
 #version 440
+#extension GL_GOOGLE_include_directive: enable
+
+#include "tonemap.inc"
 
 layout(location = 0) in vec2 v_texcoord;
 layout(location = 1) in vec4 v_color;
@@ -13,5 +16,7 @@ layout(binding = 1) uniform sampler2D tex;
 
 void main()
 {
-    fragColor = v_color * texture(tex, v_texcoord);
+    vec4 c = srgb_to_linear(v_color);
+    vec4 t = srgb_to_linear(texture(tex, v_texcoord));
+    fragColor = linear_to_srgb(c * t);
 }

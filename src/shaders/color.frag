@@ -1,4 +1,7 @@
 #version 440
+#extension GL_GOOGLE_include_directive: enable
+
+#include "tonemap.inc"
 
 layout(location = 0) in vec3 v_color;
 
@@ -11,5 +14,6 @@ layout(std140, binding = 0) uniform buf {
 
 void main()
 {
-    fragColor = vec4(v_color, opacity);
+    vec3 c = srgb_to_linear(v_color);
+    fragColor = linear_to_srgb(vec4(c, opacity));
 }
