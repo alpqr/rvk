@@ -4,7 +4,8 @@ version = "0.1.0"
 authors = ["Laszlo Agocs <laszlo.agocs@qt.io>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+log-redraw = []
 
 [dependencies]
 smallvec = "1.4.2"

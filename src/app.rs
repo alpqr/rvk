@@ -195,11 +195,13 @@ impl App {
                             &self.command_list,
                         ) {
                             Ok(current_frame_slot) => {
-                                println!(
-                                    "Render, elapsed since last {:?} (slot {})",
-                                    frame_time.elapsed(),
-                                    current_frame_slot
-                                );
+                                if cfg!(feature = "log-redraw") {
+                                    println!(
+                                        "Render, elapsed since last {:?} (slot {})",
+                                        frame_time.elapsed(),
+                                        current_frame_slot
+                                    );
+                                }
                                 frame_time = std::time::Instant::now();
                                 self.record_frame();
                                 self.swapchain_frame_state.end_frame(
