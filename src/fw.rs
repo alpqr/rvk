@@ -1448,7 +1448,7 @@ impl SwapchainFrameState {
             match present_result {
                 Err(r) => {
                     if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
-                        panic!(r)
+                        panic!("{}", r)
                     }
                 }
                 _ => (),
@@ -1807,7 +1807,7 @@ impl MemAllocator {
                     }
                 };
             }
-            Err(r) => panic!(r),
+            Err(r) => panic!("{}", r),
         }
         self.allocator.unmap_memory(allocation).unwrap();
         self.allocator

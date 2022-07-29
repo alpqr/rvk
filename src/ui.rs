@@ -171,7 +171,7 @@ impl ImGui {
             imgui_winit_support::HiDpiMode::Default,
         );
         ImGui {
-            active: false,
+            active: true,
             winit_support,
             ctx,
             device: Some(Rc::clone(device)),

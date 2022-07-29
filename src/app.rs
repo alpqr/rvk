@@ -213,7 +213,7 @@ impl App {
                             }
                             Err(r) => {
                                 if r != ash::vk::Result::ERROR_OUT_OF_DATE_KHR {
-                                    panic!(r)
+                                    panic!("{}", r)
                                 }
                             }
                         }
